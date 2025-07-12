@@ -15,9 +15,10 @@ $ ulog_console -p COM4 d:/modbus_relay/Debug/modbus_relay.elf
 
 1. Library size **< 300 bytes**
 2. Maximum throughput over the serial port at 115200: **> 3000 messages / second**
-3. Flash taken by a single log statement: ** 8 bytes **
+3. Flash taken by a single log statement: **8 bytes**
 4. Time taken by a single trace in the application: **< 2us**
 5. CPU load to send the messages (only when no busy): **<1%**
+6. IDLE tasklet latency: **<10us**
 
 ### Benefit
 
@@ -27,8 +28,8 @@ The linker script may can be patched - but that's not event required.
 3. The viewer know every possible trace before they are received - so a fully customer filtering is possible.
 
 ## What is the ULog library
-The concept is very close to the excellent Trice library but as taken a different angle.
-Where Trice does an extraction to a JSON and embedded the message ID in the code, ULog does not require any processing.
+The concept is very close to the excellent Trice library but has taken a different angle.
+Where Trice does an extraction to a JSON and embedds the message ID in the code, ULog does not require any processing.
 The traces and all the meta information are stored directly in the .elf file of the firmware.
 <br/>
 The following meta information is available:
@@ -37,6 +38,9 @@ The following meta information is available:
  * Line of the statement
  * Text associate with the trace
  * Type of the data attached to the text - size, type, sign etc. (no need to put formatters)
+ * Double buffering - 1 for each ULog - 1 for sending over the UART
+ * The second buffer is filled only when the reactor is idle
+   
 
 The meta information is added in the elf file in a non-mapped segment called .logs. This takes 0 flash.
 When the trace is sent out, only the ID of the log and the raw data are sent with 2 extra characters for framing. (COBS Framing).
