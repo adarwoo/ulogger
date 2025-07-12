@@ -1,0 +1,24 @@
+[project]
+name = "ulog-console"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "adarwoo",email = "44254473+adarwoo@users.noreply.github.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pyelftools (>=0.32,<0.33)",
+    "watchdog (>=6.0.0,<7.0.0)",
+    "pycurses (>=0.0.37,<0.0.38)",
+    "windows-curses (>=2.4.1,<3.0.0)",
+    "pyserial (>=3.5,<4.0)"
+]
+
+[tool.poetry]
+packages = [{include = "ulog_console", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
