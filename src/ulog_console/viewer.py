@@ -260,7 +260,7 @@ class Viewer:
             if not self.frozen_index:  # Not frozen
                 # Iterate from the newest backwards
                 for log in reversed(self.log_buffer):
-                    if getattr(log, 'level', DEFAULT_LOG_LEVEL) <= self.display_log_level:
+                    if log.level <= self.display_log_level:
                         logs_to_display.append(log)
                         count += 1
                         if count >= visible_lines:
@@ -279,14 +279,14 @@ class Viewer:
                 else:
                     # Iterate forward from frozen_index, applying filter
                     for log in buffer[idx_in_buffer:]:
-                        if getattr(log, 'level', DEFAULT_LOG_LEVEL) <= self.display_log_level:
+                        if log.level <= self.display_log_level:
                             logs_to_display.append(log)
                             if len(logs_to_display) >= visible_lines:
                                 break
                 # If not enough logs, fill from earlier logs
                 if len(logs_to_display) < visible_lines:
                     for log in reversed(buffer[:idx_in_buffer]):
-                        if getattr(log, 'level', DEFAULT_LOG_LEVEL) <= self.display_log_level:
+                        if log.level <= self.display_log_level:
                             logs_to_display.insert(0, log)
                             if len(logs_to_display) >= visible_lines:
                                 break
@@ -340,7 +340,7 @@ class Viewer:
                             self.frozen_index = tail_idx
                         self.frozen_index = max(head_idx, self.frozen_index - visible_lines)
                     # Handle log level keys 0-8
-                    elif chr(key) in LEVEL_COLOR.keys():
+                    elif key - ord('0') in LEVEL_COLOR.keys():
                         self.display_log_level = int(chr(key))
                     elif key == ord('q'):
                         self.running = False

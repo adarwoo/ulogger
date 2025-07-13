@@ -66,3 +66,12 @@ class PersistantIndexCircularBuffer:
             buf_idx = (self.start + i) % self.maxlen
             result.append(self.buffer[buf_idx])
         return result
+
+    def __reversed__(self):
+        # Iterate from newest to oldest
+        if self.size == 0:
+            return
+        idx = (self.end - 1) % self.maxlen
+        for _ in range(self.size):
+            yield self.buffer[idx]
+            idx = (idx - 1) % self.maxlen
