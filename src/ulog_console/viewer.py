@@ -10,6 +10,13 @@ from .buffer import PersistantIndexCircularBuffer as Buffer
 from .messages import ControlMsg
 from .logs import LogEntry
 
+#
+# Constants
+#
+
+# Maximum length of the filename to be printed in the viewer
+MAX_PRINTED_FILENAME_LENGTH = 20
+
 LOG_LEVELS = [
     "ERROR", "WARN", "MILE", "TRACE", "INFO", "DEBUG0", "DEBUG1", "DEBUG2", "DEBUG3"
 ]
@@ -140,10 +147,20 @@ class Viewer:
         self.pad.addstr(row, 12, f"{level:<7} ", attr)
 
         # Print file:line
-        self.pad.addstr(row, 20, f"{log.filename}:{log.line:<4}: - ", curses.A_NORMAL)
+
+        filename = log.filename
+        if len(filename) > MAX_PRINTED_FILENAME_LENGTH:
+            filename = "..." + filename[-(MAX_PRINTED_FILENAME_LENGTH - 3):]
+
+        self.pad.addstr(
+            row,
+            20,
+            f"{filename:>{MAX_PRINTED_FILENAME_LENGTH}}:{log.line:<4} ",
+            curses.A_NORMAL
+        )
 
         # Start formatting message after column 36
-        start_col = 36
+        start_col = MAX_PRINTED_FILENAME_LENGTH + 20 + 1 + 4 + 1
 
         # Parse the format string
         parsed = list(formatter.parse(fmt_str))
@@ -173,24 +190,31 @@ class Viewer:
             self.pad.addstr(row, start_col, fmt_str, curses.color_pair(30) | curses.A_BOLD)
 
     def draw_scrollbar(self, max_y, max_x):
-        # Draw a simple vertical scrollbar on the right edge
-        visible_lines = max_y - 1
-        total_lines = len(self.log_buffer)
-        if total_lines <= visible_lines:
-            # No need for a scrollbar
-            for i in range(visible_lines):
-                self.screen.addstr(i + 1, max_x - 1, ' ', curses.A_REVERSE)
-            return
+            # Draw a simple vertical scrollbar on the right edge
+            visible_lines = max_y - 1
+            total_lines = len(self.log_buffer)
 
-        # Calculate the scroll position and bar size
-        start_idx = max(0, total_lines - visible_lines - self.view_row)
-        bar_height = max(1, visible_lines * visible_lines // total_lines)
-        # Bar position: where the visible window starts in the buffer
-        bar_top = int(start_idx * visible_lines / total_lines)
+            if total_lines <= visible_lines:
+                # No need for a scrollbar, wipe the previous one
+                for i in range(1, visible_lines):
+                    self.screen.addstr(i, max_x - 1, ' ', curses.A_REVERSE)
+                return
 
-        for i in range(visible_lines):
-            ch = '|' if bar_top <= i < bar_top + bar_height else ' '
-            self.screen.addstr(i + 1, max_x - 1, ch, curses.A_REVERSE)
+            # Determine the start index for the scrollbar
+            if self.frozen_index is not None:
+                # When frozen, show the scrollbar relative to frozen_index
+                start_idx = max(0, self.frozen_index - visible_lines + 1)
+            else:
+                # When live, show the latest logs
+                start_idx = max(0, total_lines - visible_lines)
+
+            bar_height = max(1, visible_lines * visible_lines // total_lines)
+            # Bar position: where the visible window starts in the buffer
+            bar_top = int(start_idx * visible_lines / total_lines)
+
+            for i in range(1, visible_lines):
+                ch = '|' if bar_top <= i < bar_top + bar_height else ' '
+                self.screen.addstr(i, max_x - 1, ch, curses.A_REVERSE)
 
     def process_queue(self):
         while self.running:
@@ -281,6 +305,7 @@ class Viewer:
                         break
 
                 self.render_header()
+                self.draw_scrollbar(max_y, max_x)
                 self.refresh_pad()
 
             self.screen.refresh()
@@ -310,7 +335,7 @@ class Viewer:
             # Create a pad for scrolling logs
             max_y, max_x = self.screen.getmaxyx()
             visible_lines = max_y - 1
-            self.pad = curses.newpad(visible_lines, max_x - 1)
+            self.pad = curses.newpad(visible_lines, max_x - 2)
 
             try:
                 # Initialize color pairs for log levels
