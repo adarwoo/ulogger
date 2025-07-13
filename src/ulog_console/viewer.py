@@ -23,6 +23,8 @@ LOG_LEVELS = [
 
 DEBUG_COLOR = curses.COLOR_WHITE
 
+DEFAULT_LOG_LEVEL = 8  # Show all levels by default
+
 LEVEL_COLOR = {
     0: curses.COLOR_RED,      # ERROR
     1: 208,                   # WARN (orange-ish)
@@ -57,6 +59,8 @@ class Viewer:
         # Prevent race conditions when accessing the log buffer
         self.buffer_lock = threading.RLock()
         self.frozen_index = None
+        self.display_log_level = DEFAULT_LOG_LEVEL  # Default: show all levels
+
 
     def format_time(self, timestamp):
         if self.log_start is None:
@@ -248,19 +252,54 @@ class Viewer:
         max_y, max_x = self.screen.getmaxyx()
         visible_lines = max_y - 1
 
-        if not self.frozen_index:  # Not frozen
-            logs_to_display = self.log_buffer.latest_slice(visible_lines)
-        else:  # Frozen
-            logs_to_display = self.log_buffer.slice_by_abs_index(self.frozen_index - visible_lines, visible_lines)
-            # If frozen_index is out of range, show the latest logs
-            if not logs_to_display:
-                logs_to_display = self.log_buffer.latest_slice(visible_lines)
-                self.frozen_index = None
+        # Collect logs to display, applying log level filter
+        logs_to_display = []
+        count = 0
+
+        with self.buffer_lock:
+            if not self.frozen_index:  # Not frozen
+                # Iterate from the newest backwards
+                for log in reversed(self.log_buffer):
+                    if getattr(log, 'level', DEFAULT_LOG_LEVEL) <= self.display_log_level:
+                        logs_to_display.append(log)
+                        count += 1
+                        if count >= visible_lines:
+                            break
+                logs_to_display.reverse()  # So newest is at the bottom
+            else:  # Frozen
+                # Find the position of frozen_index in the buffer
+                buffer = list(self.log_buffer)
+                idx_in_buffer = None
+                for i, log in enumerate(buffer):
+                    if hasattr(log, 'abs_index') and log.abs_index == self.frozen_index:
+                        idx_in_buffer = i
+                        break
+                if idx_in_buffer is None:
+                    logs_to_display = []
+                else:
+                    # Iterate forward from frozen_index, applying filter
+                    for log in buffer[idx_in_buffer:]:
+                        if getattr(log, 'level', DEFAULT_LOG_LEVEL) <= self.display_log_level:
+                            logs_to_display.append(log)
+                            if len(logs_to_display) >= visible_lines:
+                                break
+                # If not enough logs, fill from earlier logs
+                if len(logs_to_display) < visible_lines:
+                    for log in reversed(buffer[:idx_in_buffer]):
+                        if getattr(log, 'level', DEFAULT_LOG_LEVEL) <= self.display_log_level:
+                            logs_to_display.insert(0, log)
+                            if len(logs_to_display) >= visible_lines:
+                                break
+
+            # If still not enough logs, pad with empty lines
+            while len(logs_to_display) < visible_lines:
+                logs_to_display.insert(0, None)
 
         for row, log in enumerate(logs_to_display):
             self.pad.move(row, 0)
             self.pad.clrtoeol()
-            self.render_log_to_pad(log, row)
+            if log is not None:
+                self.render_log_to_pad(log, row)
 
         self.pad.refresh(0, 0, 1, 0, max_y - 1, max_x - 2)
 
@@ -300,6 +339,9 @@ class Viewer:
                         if self.frozen_index is None:
                             self.frozen_index = tail_idx
                         self.frozen_index = max(head_idx, self.frozen_index - visible_lines)
+                    # Handle log level keys 0-8
+                    elif chr(key) in LEVEL_COLOR.keys():
+                        self.display_log_level = int(chr(key))
                     elif key == ord('q'):
                         self.running = False
                         break
