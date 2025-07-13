@@ -1,6 +1,8 @@
 import curses
 import threading
+import string
 from queue import Empty
+from enum import Enum, auto
 
 from .messages import ControlMsg
 from .logs import Log
@@ -9,19 +11,22 @@ LOG_LEVELS = [
     "ERROR", "WARN", "MILE", "TRACE", "INFO", "DEBUG0", "DEBUG1", "DEBUG2", "DEBUG3"
 ]
 
-# Define the color pairs for log levels
 LEVEL_COLOR = {
     0: curses.COLOR_RED,
-    1: 208,  # orange-ish
+    1: 208,
     2: curses.COLOR_YELLOW,
     3: curses.COLOR_GREEN,
     4: curses.COLOR_BLUE,
-    5: 8,    # gray
-    6: 8,    # gray
-    7: 8,    # gray
-    8: 8,    # gray
+    5: 8,
+    6: 8,
+    7: 8,
+    8: 8,
 }
 
+class ElfStatus(Enum):
+    NO_ELF = auto()
+    OK = auto()
+    BAD = auto()
 
 class Viewer:
     def __init__(self, queue, args):
@@ -30,31 +35,118 @@ class Viewer:
         self.queue = queue
         self.comm_port = args.comm
         self.elf_file = args.elf
-        self.elf_status = "?"
+        self.elf_status = ElfStatus.NO_ELF
         self.pad = None
         self.pad_row = 0
-        self.view_row = 0  # Top row of pad currently displayed
-        self.logging_active = True  # Track logging state
+        self.view_row = 0
+        self.logging_active = True
 
     def render_header(self):
         max_y, max_x = self.screen.getmaxyx()
         run_status = "RUNNING" if self.logging_active else "STOPPED"
-        header = (
-            f"Comm Port: {self.comm_port} "
-            f"Elf file: {self.elf_file} / Status: {self.elf_status} / Logging: {run_status}"
-        )
+        status_attr = curses.A_REVERSE | (curses.A_BLINK if not self.logging_active else 0)
+
+        # Left part
+        left = f"Comm Port: {self.comm_port}"
+        left_width = len(left) + 2
+
+        # Right part (run status), right justified
+        status_str = f"{run_status:<8}"
+        status_width = len(status_str) + 2
+
+        # Center part (elf file name only, centered)
+        center_start = left_width
+        center_end = max_x - status_width
+        elf_file_max = center_end - center_start - 4  # 2 spaces each side
+        elf_file = self.elf_file
+        if len(elf_file) > elf_file_max:
+            elf_file = elf_file[:max(0, elf_file_max - 3)] + "..."
+        center = f"  {elf_file}  "
+        center_pos = center_start + (center_end - center_start - len(center)) // 2
+
+        # Clear header line
+        self.screen.move(0, 0)
+        self.screen.clrtoeol()
+
+        # Draw left
         self.screen.attron(curses.A_REVERSE)
-        self.screen.addstr(0, 0, header[:max_x-2])
+        self.screen.addstr(0, 0, left)
         self.screen.attroff(curses.A_REVERSE)
-        self.screen.refresh()
+
+        # Draw center (elf file) with color based on elf_status
+        if self.elf_status == ElfStatus.NO_ELF:
+            # Black on red
+            curses.init_pair(20, curses.COLOR_BLACK, curses.COLOR_RED)
+            self.screen.attron(curses.color_pair(20))
+            self.screen.addstr(0, center_pos, center[:center_end - center_pos])
+            self.screen.attroff(curses.color_pair(20))
+        elif self.elf_status == ElfStatus.OK:
+            # Inverted grey
+            curses.init_pair(21, 8, -1)
+            self.screen.attron(curses.color_pair(21) | curses.A_REVERSE)
+            self.screen.addstr(0, center_pos, center[:center_end - center_pos])
+            self.screen.attroff(curses.color_pair(21) | curses.A_REVERSE)
+        elif self.elf_status == ElfStatus.BAD:
+            # Blink background grey, text red
+            curses.init_pair(22, curses.COLOR_RED, 8)
+            self.screen.attron(curses.color_pair(22) | curses.A_BLINK)
+            self.screen.addstr(0, center_pos, center[:center_end - center_pos])
+            self.screen.attroff(curses.color_pair(22) | curses.A_BLINK)
+
+        # Draw right (status)
+        self.screen.attron(status_attr)
+        self.screen.addstr(0, max_x - status_width, status_str)
+        self.screen.attroff(status_attr)
 
     def render_log_to_pad(self, log, row):
         level = LOG_LEVELS[log.level]
-        color_idx = LEVEL_COLOR[log.level]
-        attr = curses.color_pair(color_idx)
-        self.pad.addstr(row, 0, f"{level:<7} ", attr | curses.A_BOLD)
+        attr = curses.color_pair(log.level + 1) | curses.A_BOLD
+
+        formatter = string.Formatter()
+        fmt_str = log.fmt
+        args = getattr(log, "data", ())
+        # Use the same color as the log level, but bold
+        arg_highlight = curses.color_pair(log.level + 1) | curses.A_BOLD
+        curses.init_pair(30, curses.COLOR_WHITE, curses.COLOR_RED)
+
+        # Parse the format string
+        parsed = list(formatter.parse(fmt_str))
+        arg_index = 0
+        start_col = 30
+
+        try:
+            for literal_text, field_name, format_spec, _ in parsed:
+                # Print literal text
+                if literal_text:
+                    self.pad.addstr(row, start_col, literal_text, attr)
+                    start_col += len(literal_text)
+                if field_name is not None:
+                    # Try to get the argument
+                    try:
+                        value = args[arg_index]
+                        formatted_arg = formatter.format_field(value, format_spec)
+                        self.pad.addstr(row, start_col, formatted_arg, arg_highlight)
+                        start_col += len(str(formatted_arg))
+                        arg_index += 1
+                    except Exception:
+                        # Formatting error, highlight in red
+                        self.pad.addstr(row, start_col, f"<ERR>", curses.color_pair(30) | curses.A_BOLD)
+                        start_col += 5
+
+            # If there are leftover args, print them comma separated at the end
+            if arg_index < len(args):
+                leftovers = ", ".join(str(a) for a in args[arg_index:])
+                self.pad.addstr(row, start_col, " " + leftovers, arg_highlight)
+                start_col += len(leftovers) + 1
+        except Exception:
+            # General formatting error
+            self.pad.addstr(row, start_col, fmt_str, curses.color_pair(30) | curses.A_BOLD)
+
+        # Print level
+        self.pad.addstr(row, 0, f"{level:<7} ", attr)
+        # Print file:line
         self.pad.addstr(row, 8, f"{log.filename}:{log.line:<4} - ", curses.A_NORMAL)
-        self.pad.addstr(row, 30, log.fmt, attr | curses.A_BOLD)
+
 
     def draw_scrollbar(self, max_y, max_x):
         # Draw a simple vertical scrollbar on the right edge
@@ -96,11 +188,11 @@ class Viewer:
                 if item == ControlMsg.QUIT:
                     self.running = False
                 elif item == ControlMsg.WAIT_FOR_ELF:
-                    self.elf_status = "No ELF"
+                    self.elf_status = ElfStatus.NO_ELF
                 elif item == ControlMsg.ELF_OK:
-                    self.elf_status = "OK"
+                    self.elf_status = ElfStatus.OK
                 elif item == ControlMsg.FAILED_TO_READ_ELF:
-                    self.elf_status = "BAD"
+                    self.elf_status = ElfStatus.BAD
                 elif item == ControlMsg.RELOADED_ELF:
                     self.pad.erase()
                     self.pad_row = 0
@@ -151,6 +243,25 @@ class Viewer:
     def run(self):
         def curses_main(stdscr):
             self.screen = stdscr
+
+            # Don't echo input, hide cursor
+            curses.curs_set(0)
+            curses.noecho()
+            curses.cbreak()
+
+            if curses.has_colors():
+                curses.start_color()
+                curses.use_default_colors()
+                # Initialize color pairs for log levels
+                for level, color in LEVEL_COLOR.items():
+                    curses.init_pair(level + 1, color, curses.COLOR_BLACK)
+
+            # Initialize color pairs for header
+            curses.init_pair(20, curses.COLOR_BLACK, curses.COLOR_RED)
+            curses.init_pair(31, curses.COLOR_YELLOW, -1)
+            curses.init_pair(30, curses.COLOR_WHITE, curses.COLOR_RED)
+
+            # Initialize color pairs for log levels
             display_thread = threading.Thread(target=self.display_items, daemon=True)
             input_thread = threading.Thread(target=self.read_input, daemon=True)
             display_thread.start()

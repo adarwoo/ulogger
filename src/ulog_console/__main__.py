@@ -7,7 +7,8 @@ from .elf_reader import Reader as ElfReader
 from .serial_reader import Reader as SerialReader
 
 
-def main(args):
+def main():
+    args = parse_args()
     msg_queue = queue.Queue()
     elf_reader = ElfReader(args, msg_queue)
     serial_reader = SerialReader(args, msg_queue, elf_reader.logs)
@@ -41,4 +42,4 @@ def main(args):
     elf_reader.stop()
 
 if __name__ == "__main__":
-    main(parse_args())
+    main()
