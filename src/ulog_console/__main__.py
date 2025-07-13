@@ -9,10 +9,15 @@ from .serial_reader import Reader as SerialReader
 
 def main():
     args = parse_args()
-    msg_queue = queue.Queue()
-    elf_reader = ElfReader(args, msg_queue)
-    serial_reader = SerialReader(args, msg_queue, elf_reader.logs)
-    viewer = Viewer(msg_queue, args)
+
+    try:
+        msg_queue = queue.Queue()
+        elf_reader = ElfReader(args, msg_queue)
+        serial_reader = SerialReader(args, msg_queue, elf_reader.logs)
+        viewer = Viewer(msg_queue, args)
+    except Exception as e:
+        print(f"Error initializing components: {e}")
+        return
 
     threads = []
 
@@ -20,7 +25,13 @@ def main():
         elf_reader.run()
 
     def run_serial():
-        serial_reader.run()
+        try:
+            serial_reader.run()
+        except Exception as e:
+            print("Serial thread exception:", e)
+            serial_reader.stop()
+            elf_reader.stop()
+            viewer.running = False
 
     def run_viewer():
         import curses

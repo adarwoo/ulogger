@@ -1,6 +1,6 @@
 [project]
 name = "ulog-console"
-version = "0.1.0"
+version = "1.0"
 description = ""
 authors = [
     {name = "adarwoo",email = "44254473+adarwoo@users.noreply.github.com"}
