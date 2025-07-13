@@ -3,7 +3,6 @@ import serial
 import threading
 
 from ulog_console.logs import ApplicationLogs, ElfNotReady
-
 from .messages import ControlMsg
 
 EOF = 0xA6  # COBS end of frame marker
@@ -31,7 +30,6 @@ def cobs_decode(encoded: bytearray) -> bytearray:
         index += code - 1
 
     return decoded
- 
 
 class Reader:
     def __init__(self, args, queue, app_logs):
@@ -49,48 +47,36 @@ class Reader:
             rtscts=0
         )
         self._stop_event = threading.Event()
+        self._thread = None
 
-    async def run(self):
+    def run(self):
         if not self.serial.is_open:
             raise RuntimeError("Serial port is not open")
-
-        loop = asyncio.get_running_loop()
-        thread = threading.Thread(target=self.thread_loop, args=(loop,))
-        thread.start()
-
-        # Wait until stop is called
+        self._thread = threading.Thread(target=self.thread_loop, daemon=True)
+        self._thread.start()
         while not self._stop_event.is_set():
-            await asyncio.sleep(0.5)
-
-        thread.join()
+            self._stop_event.wait(0.5)
+        self._thread.join()
 
     def stop(self):
         if self.serial:
             self.serial.close()
         self._stop_event.set()
 
-    def thread_loop(self, loop):
+    def thread_loop(self):
         while self.serial and not self._stop_event.is_set():
-            # Read a whole COBS packet
-            # Allow for up to 1 second of data
-            b = self.serial.read_until(EOF.to_bytes(), size=11520)
-            print(b)
-
             try:
+                b = self.serial.read_until(EOF.to_bytes(), size=11520)
                 if len(b) < 2:
                     raise ValueError("Invalid COBS packet size")
-
-                # Decode the COBS packet - remove the framing character
                 decoded = cobs_decode(b)
-
-                # Decode the log ID and data
                 log = self.app_logs.decode_frame(decoded)
-            except ElfNotReady as e:
+            except ElfNotReady:
                 continue
-            except Exception as e:
+            except Exception:
                 if not self.bad_data:
-                    loop.call_soon_threadsafe(self.queue.put_nowait, ControlMsg.BAD_DATA)
+                    self.queue.put(ControlMsg.BAD_DATA)
                     self.bad_data = True
             else:
                 self.bad_data = False
-                loop.call_soon_threadsafe(self.queue.put_nowait, log)
+                self.queue.put(log)

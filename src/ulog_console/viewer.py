@@ -1,7 +1,6 @@
-import asyncio
 import curses
-
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from queue import Empty
 
 from .messages import ControlMsg
 from .logs import Log
@@ -69,7 +68,7 @@ class Viewer:
             ch = '|' if bar_top <= i < bar_top + bar_height else ' '
             self.screen.addstr(i + 1, max_x - 1, ch, curses.A_REVERSE)
 
-    async def display_items(self):
+    def display_items(self):
         curses.curs_set(0)
         self.screen.scrollok(True)
         max_y, max_x = self.screen.getmaxyx()
@@ -82,13 +81,16 @@ class Viewer:
         while self.running:
             self.render_header()
             self.draw_scrollbar(max_y, max_x)
-            if self.queue.qsize() > 5000:
-                while not self.queue.empty():
-                    await self.queue.get()
-                self.pad.addstr(self.pad_row, 0, "Queue flushed (over 5000 items)")
-                self.pad_row += 1
+            try:
+                if self.queue.qsize() > 5000:
+                    while not self.queue.empty():
+                        self.queue.get_nowait()
+                    self.pad.addstr(self.pad_row, 0, "Queue flushed (over 5000 items)")
+                    self.pad_row += 1
 
-            item = await self.queue.get()
+                item = self.queue.get(timeout=0.1)
+            except Empty:
+                continue
 
             if isinstance(item, ControlMsg):
                 if item == ControlMsg.QUIT:
@@ -121,46 +123,38 @@ class Viewer:
             )
             self.draw_scrollbar(max_y, max_x)
 
-    async def read_input(self):
+    def read_input(self):
         self.screen.timeout(100)
-        loop = asyncio.get_event_loop()
-
-        def get_key():
-            return self.screen.getch()
-
         max_y, max_x = self.screen.getmaxyx()
-        with ThreadPoolExecutor() as executor:
-            while self.running:
-                key = await loop.run_in_executor(executor, get_key)
-                if key != -1:
-                    if key in (curses.KEY_UP, ord('k')):
-                        self.view_row = max(0, self.view_row - 1)
-                    elif key in (curses.KEY_DOWN, ord('j')):
-                        self.view_row = min(max(0, self.pad_row - (max_y - 2)), self.view_row + 1)
-                    elif key == curses.KEY_NPAGE:  # Page Down
-                        self.view_row = min(max(0, self.pad_row - (max_y - 2)), self.view_row + (max_y - 2))
-                    elif key == curses.KEY_PPAGE:  # Page Up
-                        self.view_row = max(0, self.view_row - (max_y - 2))
-                    elif key == ord(' '):  # Spacebar toggles logging
-                        self.logging_active = not self.logging_active
-                        self.render_header()
-                    elif key == ord('q'):
-                        self.running = False
-                        break
+        while self.running:
+            key = self.screen.getch()
+            if key != -1:
+                if key in (curses.KEY_UP, ord('k')):
+                    self.view_row = max(0, self.view_row - 1)
+                elif key in (curses.KEY_DOWN, ord('j')):
+                    self.view_row = min(max(0, self.pad_row - (max_y - 2)), self.view_row + 1)
+                elif key == curses.KEY_NPAGE:  # Page Down
+                    self.view_row = min(max(0, self.pad_row - (max_y - 2)), self.view_row + (max_y - 2))
+                elif key == curses.KEY_PPAGE:  # Page Up
+                    self.view_row = max(0, self.view_row - (max_y - 2))
+                elif key == ord(' '):  # Spacebar toggles logging
+                    self.logging_active = not self.logging_active
+                    self.render_header()
+                elif key == ord('q'):
+                    self.running = False
+                    break
+                self.pad.refresh(
+                    self.view_row, 0, 1, 0, max_y - 1, max_x - 2
+                )
+                self.draw_scrollbar(max_y, max_x)
 
-                    # Redraw after scroll or state change
-                    self.pad.refresh(
-                        self.view_row, 0, 1, 0, max_y - 1, max_x - 2
-                    )
-                    self.draw_scrollbar(max_y, max_x)
-
-    async def gather(self):
-        self.screen.erase()
-        self.screen.scrollok(True)
-
-        await asyncio.gather(
-            self.display_items(),
-            self.read_input()
-        )
-
-        print("Exiting viewer...")  # For debugging purposes
+    def run(self):
+        def curses_main(stdscr):
+            self.screen = stdscr
+            display_thread = threading.Thread(target=self.display_items, daemon=True)
+            input_thread = threading.Thread(target=self.read_input, daemon=True)
+            display_thread.start()
+            input_thread.start()
+            display_thread.join()
+            input_thread.join()
+        curses.wrapper(curses_main)
