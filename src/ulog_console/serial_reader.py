@@ -1,8 +1,8 @@
-import asyncio
 import serial
 import threading
+import time
 
-from ulog_console.logs import ApplicationLogs, ElfNotReady
+from ulog_console.logs import ApplicationLogs, ElfNotReady, LogEntry
 from .messages import ControlMsg
 
 EOF = 0xA6  # COBS end of frame marker
@@ -69,8 +69,11 @@ class Reader:
                 b = self.serial.read_until(EOF.to_bytes(), size=11520)
                 if len(b) < 2:
                     raise ValueError("Invalid COBS packet size")
+                # Timestamp at frame receive
+                now = time.time()
                 decoded = cobs_decode(b)
-                log = self.app_logs.decode_frame(decoded)
+                meta, values = self.app_logs.decode_frame(decoded)
+                log = LogEntry(meta, now, values)
             except ElfNotReady:
                 continue
             except Exception:

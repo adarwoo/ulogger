@@ -118,7 +118,7 @@ class Log:
     Returns:
         _type_: _description_
     """
-    __slots__ = ('level', 'line', 'filename', 'fmt', 'payload_length', 'types', 'data')
+    __slots__ = ('level', 'line', 'filename', 'fmt', 'payload_length', 'types')
 
     def __init__(self, level, line, filename, fmt, payload_length, types):
         self.level = level
@@ -127,8 +127,6 @@ class Log:
         self.fmt = fmt
         self.payload_length = payload_length
         self.types = types
-        # Store the Python typed data for displaying
-        self.data = None
 
     @classmethod
     def from_elf_data(cls, data):
@@ -151,6 +149,36 @@ class Log:
         filename, offset = read_cstr()
         fmt, _ = read_cstr(offset, False)
         return cls(level, line, filename, fmt, payload_length, types)
+
+
+class LogEntry:
+    """
+    Represents a log entry with its metadata and payloads.
+    This is used to store the logs in the circular buffer.
+    """
+    def __init__(self, static_log, timestamp, data):
+        self.logmeta = static_log
+        self.timestamp = timestamp
+        self.data = data
+
+    @property
+    def level(self):
+        return self.logmeta.level
+
+    @property
+    def line(self):
+        return self.logmeta.line
+
+    @property
+    def filename(self):
+        return self.logmeta.filename
+
+    @property
+    def fmt(self):
+        return self.logmeta.fmt
+
+    def __repr__(self):
+        return f"LogEntry(logmeta={self.logmeta}, timestamp={self.timestamp}, data={self.data})"
 
 
 class ApplicationLogs:
@@ -179,7 +207,15 @@ class ApplicationLogs:
         self.elf_ready = True
 
     def decode_frame(self, data):
-        """ Decode a serial data frame into a log entry. """
+        """
+        Decode a serial data frame into a log entry.
+        Args:
+            data (bytes): The raw data frame received from the serial port.
+        Returns:
+            A tuple of (Log, list of values) where:
+            - Log is the static log entry metadata.
+            - list of values is the decoded payload values.
+        """
 
         if not self.elf_ready:
             raise ElfNotReady("ELF file not ready")
@@ -212,8 +248,5 @@ class ApplicationLogs:
             raise ValueError(f"Invalid payload length for log ID {log_id}: "
                              f"expected {entry.payload_length}, got {offset}")
 
-        # Store the values in the entry
-        entry.data = values
-
-        return entry
+        return entry, values
 
