@@ -1,6 +1,7 @@
 import curses
 import threading
 import string
+import collections
 from queue import Empty
 from enum import Enum, auto
 
@@ -11,16 +12,18 @@ LOG_LEVELS = [
     "ERROR", "WARN", "MILE", "TRACE", "INFO", "DEBUG0", "DEBUG1", "DEBUG2", "DEBUG3"
 ]
 
+DEBUG_COLOR = curses.COLOR_WHITE
+
 LEVEL_COLOR = {
-    0: curses.COLOR_RED,
-    1: 208,
-    2: curses.COLOR_YELLOW,
-    3: curses.COLOR_GREEN,
-    4: curses.COLOR_BLUE,
-    5: 8,
-    6: 8,
-    7: 8,
-    8: 8,
+    0: curses.COLOR_RED,      # ERROR
+    1: 208,                   # WARN (orange-ish)
+    2: curses.COLOR_YELLOW,   # MILE
+    3: curses.COLOR_GREEN,    # TRACE
+    4: curses.COLOR_BLUE,     # INFO
+    5: 252,                   # DEBUG0 - light gray
+    6: 244,                   # DEBUG1 - medium gray
+    7: 240,                   # DEBUG2 - darker gray
+    8: 236,                   # DEBUG3 - dark gray
 }
 
 class ElfStatus(Enum):
@@ -40,6 +43,8 @@ class Viewer:
         self.pad_row = 0
         self.view_row = 0
         self.logging_active = True
+        self.pad_height = 10000  # or your chosen pad size
+        self.log_buffer = collections.deque(maxlen=self.pad_height)
 
     def render_header(self):
         max_y, max_x = self.screen.getmaxyx()
@@ -105,23 +110,31 @@ class Viewer:
         formatter = string.Formatter()
         fmt_str = log.fmt
         args = getattr(log, "data", ())
-        # Use the same color as the log level, but bold
         arg_highlight = curses.color_pair(log.level + 1) | curses.A_BOLD
-        curses.init_pair(30, curses.COLOR_WHITE, curses.COLOR_RED)
+
+        # Print timestamp (same color as file:line, i.e. curses.A_NORMAL)
+        timestamp = log.timestamp or ""
+        self.pad.addstr(row, 0, f"{timestamp:<11} ", curses.A_NORMAL)
+
+        # Print level
+        self.pad.addstr(row, 12, f"{level:<7} ", attr)
+
+        # Print file:line
+        self.pad.addstr(row, 20, f"{log.filename}:{log.line:<4} - ", curses.A_NORMAL)
+
+        # Start formatting message after column 36
+        start_col = 36
 
         # Parse the format string
         parsed = list(formatter.parse(fmt_str))
         arg_index = 0
-        start_col = 30
 
         try:
             for literal_text, field_name, format_spec, _ in parsed:
-                # Print literal text
                 if literal_text:
                     self.pad.addstr(row, start_col, literal_text, attr)
                     start_col += len(literal_text)
                 if field_name is not None:
-                    # Try to get the argument
                     try:
                         value = args[arg_index]
                         formatted_arg = formatter.format_field(value, format_spec)
@@ -129,24 +142,15 @@ class Viewer:
                         start_col += len(str(formatted_arg))
                         arg_index += 1
                     except Exception:
-                        # Formatting error, highlight in red
                         self.pad.addstr(row, start_col, f"<ERR>", curses.color_pair(30) | curses.A_BOLD)
                         start_col += 5
 
-            # If there are leftover args, print them comma separated at the end
             if arg_index < len(args):
                 leftovers = ", ".join(str(a) for a in args[arg_index:])
                 self.pad.addstr(row, start_col, " " + leftovers, arg_highlight)
                 start_col += len(leftovers) + 1
         except Exception:
-            # General formatting error
             self.pad.addstr(row, start_col, fmt_str, curses.color_pair(30) | curses.A_BOLD)
-
-        # Print level
-        self.pad.addstr(row, 0, f"{level:<7} ", attr)
-        # Print file:line
-        self.pad.addstr(row, 8, f"{log.filename}:{log.line:<4} - ", curses.A_NORMAL)
-
 
     def draw_scrollbar(self, max_y, max_x):
         # Draw a simple vertical scrollbar on the right edge
@@ -164,23 +168,21 @@ class Viewer:
         curses.curs_set(0)
         self.screen.scrollok(True)
         max_y, max_x = self.screen.getmaxyx()
-        pad_height = 10000
-        pad_width = max_x - 1  # Leave space for scrollbar
-        self.pad = curses.newpad(pad_height, pad_width)
         self.pad_row = 0
         self.view_row = 0
 
         while self.running:
-            self.render_header()
-            self.draw_scrollbar(max_y, max_x)
             try:
                 if self.queue.qsize() > 5000:
                     while not self.queue.empty():
                         self.queue.get_nowait()
-                    self.pad.addstr(self.pad_row, 0, "Queue flushed (over 5000 items)")
+
+                    with self.screen_lock:
+                        self.pad.addstr(self.pad_row, 0, "Queue flushed (over 5000 items)")
+
                     self.pad_row += 1
 
-                item = self.queue.get(timeout=0.1)
+                item = self.queue.get(timeout=1)
             except Empty:
                 continue
 
@@ -194,32 +196,37 @@ class Viewer:
                 elif item == ControlMsg.FAILED_TO_READ_ELF:
                     self.elf_status = ElfStatus.BAD
                 elif item == ControlMsg.RELOADED_ELF:
-                    self.pad.erase()
+                    with self.screen_lock:
+                        self.pad.erase()
                     self.pad_row = 0
                     self.view_row = 0
-                self.render_header()
+
+                with self.screen_lock:
+                    self.render_header()
             elif isinstance(item, Log):
                 if self.logging_active:
-                    if self.pad_row >= pad_height - 1:
-                        self.pad_row = pad_height - 2
-                    self.pad.move(self.pad_row, 0)
-                    self.pad.clrtoeol()
-                    self.render_log_to_pad(item, self.pad_row)
-                    self.pad_row += 1
-                    # Always scroll to bottom when new log arrives
-                    self.view_row = max(0, self.pad_row - (max_y - 2))
+                    # Add log to buffer
+                    self.log_buffer.append(item)
+                    # Only display logs in buffer
+                    self.pad_row = len(self.log_buffer) - 1
+                    visible_lines = max_y - 1
+                    at_bottom = self.view_row >= max(0, self.pad_row - visible_lines - 1)
 
-            # Display pad below header
-            self.pad.refresh(
-                self.view_row, 0, 1, 0, max_y - 1, max_x - 2
-            )
-            self.draw_scrollbar(max_y, max_x)
+                    with self.screen_lock:
+                        self.pad.move(self.pad_row, 0)
+                        self.pad.clrtoeol()
+                        self.render_log_to_pad(item, self.pad_row)
+
+                    if at_bottom:
+                        self.view_row = max(0, self.pad_row - visible_lines)
 
     def read_input(self):
         self.screen.timeout(100)
         max_y, max_x = self.screen.getmaxyx()
+
         while self.running:
             key = self.screen.getch()
+
             if key != -1:
                 if key in (curses.KEY_UP, ord('k')):
                     self.view_row = max(0, self.view_row - 1)
@@ -235,12 +242,16 @@ class Viewer:
                 elif key == ord('q'):
                     self.running = False
                     break
-                self.pad.refresh(
-                    self.view_row, 0, 1, 0, max_y - 1, max_x - 2
-                )
+
+            with self.screen_lock:
+                self.render_header()
                 self.draw_scrollbar(max_y, max_x)
+                self.pad.refresh(self.view_row, 0, 1, 0, max_y - 1, max_x - 1)
 
     def run(self):
+        # curses is not thread-safe
+        self.screen_lock = threading.Lock()
+
         def curses_main(stdscr):
             self.screen = stdscr
 
@@ -260,6 +271,12 @@ class Viewer:
             curses.init_pair(20, curses.COLOR_BLACK, curses.COLOR_RED)
             curses.init_pair(31, curses.COLOR_YELLOW, -1)
             curses.init_pair(30, curses.COLOR_WHITE, curses.COLOR_RED)
+
+            # Create a pad for scrolling logs
+            _, max_x = self.screen.getmaxyx()
+            self.pad_height = 10000
+            pad_width = max_x - 1  # Leave space for scrollbar
+            self.pad = curses.newpad(self.pad_height, pad_width)
 
             # Initialize color pairs for log levels
             display_thread = threading.Thread(target=self.display_items, daemon=True)
