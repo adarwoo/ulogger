@@ -1,5 +1,7 @@
 import os
 import time
+import hashlib
+
 from elftools.elf.elffile import ELFFile
 
 from .messages import ControlMsg
@@ -33,29 +35,38 @@ class Reader:
         self.running = False
 
     def load_elf(self):
-        try:
-            if not os.path.isfile(self.elf_path):
-                raise FileNotFoundError(f"ELF file not found: {self.elf_path}")
+        section = None
+        digest = None
 
-            try:
-                f = open(self.elf_path, 'rb')
-                elf = ELFFile(f)
-            except Exception as open_exc:
-                raise Exception(f"Failed to open/read ELF file: {self.elf_path} ({open_exc})")
-            else:
+        if not os.path.isfile(self.elf_path):
+            self.queue.put(ControlMsg.WAIT_FOR_ELF)
+            return
+
+        try:
+            sha256 = hashlib.sha256()
+
+            with open(self.elf_path, 'rb') as elf_file:
+
+                for chunk in iter(lambda: elf_file.read(4096), b''):
+                    sha256.update(chunk)
+
+                elf_file.seek(0)
+                elf = ELFFile(elf_file)
                 section = elf.get_section_by_name('.logs')
 
                 if not section:
-                    raise Exception(f"Invalid ELF file '{self.elf_path}': no .logs section found")
+                    self.queue.put(ControlMsg.failed_to_read_elf(f"No .logs section in ELF file '{self.elf_path}'"))
+                    return
 
+                # Read the section data (the elf file must still be opened)
                 self.logs.reset(section)
-                self.queue.put(ControlMsg.ELF_OK)
-            finally:
-                f.close()
-        except FileNotFoundError:
-            self.queue.put(ControlMsg.WAIT_FOR_ELF)
-        except Exception as e:
-            self.queue.put(ControlMsg.failed_to_read_elf(str(e)))
+
+            digest = sha256.hexdigest()
+        except OSError as open_exc:
+            self.queue.put(ControlMsg.failed_to_read_elf(f"Failed to open the ELF file '{self.elf_path}'"))
+            return
         else:
             if self.last_mtime is not None:
-                self.queue.put(ControlMsg.RELOADED_ELF)
+                self.queue.put(ControlMsg.reload_elf(digest))
+            else:
+                self.queue.put(ControlMsg.elf_ok(digest))

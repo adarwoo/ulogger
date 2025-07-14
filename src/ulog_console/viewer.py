@@ -9,6 +9,7 @@ from enum import Enum, auto
 from .buffer import PersistantIndexCircularBuffer as Buffer
 from .messages import ControlMsg
 from .logs import LogEntry
+import datetime
 
 #
 # Constants
@@ -46,6 +47,7 @@ class ElfStatus(Enum):
 class Viewer:
     def __init__(self, queue, args):
         self.screen = None
+        self.args = args
         self.running = True
         self.queue = queue
         self.comm_port = args.comm
@@ -148,9 +150,15 @@ class Viewer:
         self.screen.attroff(status_attr)
 
     def render_log_to_pad(self, log, row):
-        level = LOG_LEVELS[log.level]
-        attr = curses.color_pair(log.level + 1) | curses.A_BOLD
+        # Log could be a string or a LogEntry object
+        if isinstance(log, str):
+            # If it's a string, treat it as a log message
+            attr = curses.color_pair(20) | curses.A_BOLD
+            self.pad.addstr(row, 0, log, attr)
+            return
 
+        attr = curses.color_pair(log.level + 1) | curses.A_BOLD
+        level = LOG_LEVELS[log.level]
         formatter = string.Formatter()
         fmt_str = log.fmt
         args = getattr(log, "data", ())
@@ -250,13 +258,25 @@ class Viewer:
                     self.running = False
                 elif item == ControlMsg.WAIT_FOR_ELF:
                     self.elf_status = ElfStatus.NO_ELF
-                elif item == ControlMsg.ELF_OK:
-                    self.elf_status = ElfStatus.OK
                 elif item == ControlMsg.FAILED_TO_READ_ELF:
                     self.elf_status = ElfStatus.BAD
-                elif item == ControlMsg.RELOADED_ELF:
-                    self.log_buffer = Buffer(maxlen=self.log_buffer.maxlen)
-                    self.log_start = None
+                elif item in (ControlMsg.ELF_OK, ControlMsg.RELOADED_ELF):
+                    self.elf_status = ElfStatus.OK
+
+                    with self.buffer_lock:
+                        if item == ControlMsg.RELOADED_ELF and self.args.clear:
+                            # Create a new log buffer (discard old logs or create a new one)
+                            self.log_buffer = Buffer(maxlen=self.log_buffer.maxlen)
+
+                        # Add a log entry with datetime and sha256 of the new elf file
+                        dt_str = datetime.datetime.now().strftime("%Y%m%d %H:%M")
+
+                        status = "reloaded" if item == ControlMsg.RELOADED_ELF else "loaded"
+                        self.log_buffer.append(f"[{dt_str}] ELF {status}, sha256={item.sha256}")
+
+                        # Used to determine the time of the first log entry
+                        # Reset since we've yet to receive any logs
+                        self.log_start = None
             elif isinstance(item, LogEntry):
                 with self.buffer_lock:
                     self.log_buffer.append(item)
@@ -277,19 +297,24 @@ class Viewer:
             if not self.frozen_index:  # Not frozen
                 # Iterate from the newest backwards
                 for log in reversed(self.log_buffer):
-                    if log.level <= self.display_log_level:
+                    if isinstance(log, str) or log.level <= self.display_log_level:
+                        # If it's a string, treat it as a log message
                         logs_to_display.append(log)
                         count += 1
                         if count >= visible_lines:
                             break
             else:  # Frozen
-                index = max(self.log_buffer.head_abs_index(), self.frozen_index)
+                head_index = self.log_buffer.head_abs_index()
+                index = max(head_index, self.frozen_index)
 
-                while index and index >= self.log_buffer.head_abs_index() and len(logs_to_display) < visible_lines:
+                while index is not None and index >= head_index and len(logs_to_display) < visible_lines:
                     log = self.log_buffer[index]
 
-                    if log.level <= self.display_log_level:
+                    if isinstance(log, str) or log.level <= self.display_log_level:
                         logs_to_display.append(log)
+
+                    if index == head_index:
+                        break  # Prevent going below the first entry
 
                     index -= 1
 

@@ -6,7 +6,7 @@ authors = [
     {name = "adarwoo",email = "44254473+adarwoo@users.noreply.github.com"}
 ]
 readme = "README.md"
-requires-python = "3.13.3"
+requires-python = ">=3.13.3,<3.14"
 dependencies = [
     "pyelftools (>=0.32,<0.33)",
     "pycurses (>=0.0.37,<0.0.38)",
