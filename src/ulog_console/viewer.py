@@ -289,6 +289,9 @@ class Viewer:
         max_y, max_x = self.screen.getmaxyx()
         visible_lines = max_y - 1
 
+        if self.pad is None or self.pad.getmaxyx() != (max_y, max_x):
+            self.pad = curses.newpad(max_y, max_x)
+
         # Collect logs to display, applying log level filter
         logs_to_display = []
         count = 0
@@ -411,11 +414,6 @@ class Viewer:
             curses.init_pair(20, curses.COLOR_BLACK, curses.COLOR_RED)
             curses.init_pair(31, curses.COLOR_YELLOW, -1)
             curses.init_pair(30, curses.COLOR_WHITE, curses.COLOR_RED)
-
-            # Create a pad for scrolling logs
-            max_y, max_x = self.screen.getmaxyx()
-            visible_lines = max_y - 1
-            self.pad = curses.newpad(visible_lines, max_x - 2)
 
             try:
                 # Initialize color pairs for log levels

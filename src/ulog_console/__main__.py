@@ -1,5 +1,6 @@
 import threading
 import queue
+import signal
 
 from .cli import parse_args
 from .viewer import Viewer
@@ -39,6 +40,14 @@ def main():
             viewer.screen = stdscr
             viewer.run()  # viewer.run() should block until quit
         curses.wrapper(curses_main)
+
+    def handle_sigint(signum, frame):
+        print("\nCTRL-C received, shutting down...")
+        viewer.running = False
+        serial_reader.stop()
+        elf_reader.stop()
+
+    signal.signal(signal.SIGINT, handle_sigint)
 
     threads.append(threading.Thread(target=run_elf, daemon=True))
     threads.append(threading.Thread(target=run_serial, daemon=True))
