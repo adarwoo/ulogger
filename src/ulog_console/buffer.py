@@ -75,3 +75,33 @@ class PersistantIndexCircularBuffer:
         for _ in range(self.size):
             yield self.buffer[idx]
             idx = (idx - 1) % self.maxlen
+
+    def index_from_abs_index(self, abs_index):
+        """
+        Returns the buffer position (0..maxlen-1) for a given abs_index,
+        or None if abs_index is not currently in the buffer.
+        """
+        if self.size == 0:
+            return None
+
+        head = self.head_abs_index()
+        tail = self.tail_abs_index()
+
+        if abs_index < head or abs_index > tail:
+            return None
+
+        idx = abs_index - head
+
+        return (self.start + idx) % self.maxlen
+
+    def __getitem__(self, abs_index):
+        """
+        Allows access to buffer elements by absolute index.
+        Raises IndexError if abs_index is not currently in the buffer.
+        """
+        buf_idx = self.index_from_abs_index(abs_index)
+
+        if buf_idx is None:
+            raise IndexError("Absolute index not in buffer")
+
+        return self.buffer[buf_idx]
