@@ -60,7 +60,20 @@ class Viewer:
         self.buffer_lock = threading.RLock()
         self.frozen_index = None
         self.display_log_level = DEFAULT_LOG_LEVEL  # Default: show all levels
+        # Signalling between threads for input handling
+        self.input_condition = threading.Condition()
+        self.input_waiting = False
 
+    def signal_input(self):
+        """ Signal that input is available, allowing the viewer to refresh immediately."""
+        with self.input_condition:
+            # Temporarily set non-blocking mode
+            self.screen.nodelay(True)
+            pending_key = self.screen.getch()
+            self.screen.nodelay(False)
+            # Only signal if no key is pending
+            if pending_key == -1 and self.input_waiting:
+                curses.ungetch(-1)
 
     def format_time(self, timestamp):
         if self.log_start is None:
@@ -248,6 +261,10 @@ class Viewer:
                 with self.buffer_lock:
                     self.log_buffer.append(item)
 
+            # Signal the input thread that new work has arrived
+            with self.input_condition:
+                self.input_condition.notify()
+
     def refresh_pad(self):
         max_y, max_x = self.screen.getmaxyx()
         visible_lines = max_y - 1
@@ -265,33 +282,19 @@ class Viewer:
                         count += 1
                         if count >= visible_lines:
                             break
-                logs_to_display.reverse()  # So newest is at the bottom
             else:  # Frozen
-                # Find the position of frozen_index in the buffer
-                buffer = list(self.log_buffer)
-                idx_in_buffer = None
-                for i, log in enumerate(buffer):
-                    if hasattr(log, 'abs_index') and log.abs_index == self.frozen_index:
-                        idx_in_buffer = i
-                        break
-                if idx_in_buffer is None:
-                    logs_to_display = []
-                else:
-                    # Iterate forward from frozen_index, applying filter
-                    for log in buffer[idx_in_buffer:]:
-                        if log.level <= self.display_log_level:
-                            logs_to_display.append(log)
-                            if len(logs_to_display) >= visible_lines:
-                                break
-                # If not enough logs, fill from earlier logs
-                if len(logs_to_display) < visible_lines:
-                    for log in reversed(buffer[:idx_in_buffer]):
-                        if log.level <= self.display_log_level:
-                            logs_to_display.insert(0, log)
-                            if len(logs_to_display) >= visible_lines:
-                                break
+                index = max(self.log_buffer.head_abs_index(), self.frozen_index)
+
+                while index and index >= self.log_buffer.head_abs_index() and len(logs_to_display) < visible_lines:
+                    log = self.log_buffer[index]
+
+                    if log.level <= self.display_log_level:
+                        logs_to_display.append(log)
+
+                    index -= 1
 
             # If still not enough logs, pad with empty lines
+            logs_to_display.reverse()  # So newest is at the bottom
             while len(logs_to_display) < visible_lines:
                 logs_to_display.insert(0, None)
 
@@ -304,20 +307,28 @@ class Viewer:
         self.pad.refresh(0, 0, 1, 0, max_y - 1, max_x - 2)
 
     def refresh_loop(self):
-        self.screen.timeout(100)
-        frozen = False
+        self.screen.nodelay(True)  # Non-blocking input
+
+        def screen_refresh():
+            max_y, max_x = self.screen.getmaxyx()
+            self.render_header()
+            self.refresh_pad()
+            self.draw_scrollbar(max_y, max_x)
+            self.screen.refresh()
 
         while self.running:
+            # Allow for the screen to be resized
             max_y, max_x = self.screen.getmaxyx()
             visible_lines = max_y - 1
 
             key = self.screen.getch()
 
-            with self.buffer_lock:
-                head_idx = self.log_buffer.head_abs_index()
-                tail_idx = self.log_buffer.tail_abs_index()
+            if key != -1:
+                # Get the current head and tail indexes of the log buffer
+                with self.buffer_lock:
+                    head_idx = self.log_buffer.head_abs_index()
+                    tail_idx = self.log_buffer.tail_abs_index()
 
-                if key != -1:
                     if key == ord(' '):
                         if self.frozen_index is None:
                             self.frozen_index = tail_idx
@@ -346,11 +357,13 @@ class Viewer:
                         self.running = False
                         break
 
-                self.render_header()
-                self.draw_scrollbar(max_y, max_x)
-                self.refresh_pad()
-
-            self.screen.refresh()
+                    screen_refresh()
+            else:
+                # Wait for signal or timeout - so we have a 20ms latency in key handling
+                with self.input_condition:
+                    if self.input_condition.wait(timeout=0.02):  # 20ms
+                        with self.buffer_lock:
+                            screen_refresh()
 
     def run(self):
         def curses_main(stdscr):
