@@ -1,6 +1,6 @@
-# ULog Console
+# ULogger
 
-The ULog console is as traces/logs viewer for AVR firmware using the ULog library.
+The ULogger is the viewer for all logs created from the ULog API.
 For more on the ULog AVR logger - check the asx project.
 
 It is required to view the traces of ULog - but conveniently also replaces your serial console viewer.
@@ -82,3 +82,4 @@ The following meta information is available:
 
 The meta information is added in the elf file in a non-mapped segment called .logs. This takes 0 flash.
 When the trace is sent out, only the ID of the log and the raw data are sent with 2 extra characters for framing. (COBS Framing).
+
