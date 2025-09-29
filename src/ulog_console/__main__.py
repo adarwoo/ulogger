@@ -12,10 +12,8 @@ def main():
     args = parse_args()
 
     try:
-        msg_queue = queue.Queue()
         elf_reader = ElfReader(args, msg_queue)
         serial_reader = SerialReader(args, msg_queue, elf_reader.logs)
-        viewer = Viewer(msg_queue, args)
     except Exception as e:
         print(f"Error initializing components: {e}")
         return
