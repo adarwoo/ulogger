@@ -7,18 +7,21 @@ class ElfNotReady(Exception):
 
 class TypeNone:
     length = 0
+    unpack_format = ''
     @classmethod
     def from_bytes(cls, data):
         return None
 
 class TypeU8:
     length = 1
+    unpack_format = 'B'
     @classmethod
     def from_bytes(cls, data):
         return int(data[0])
 
 class TypeS8:
     length = 1
+    unpack_format = 'b'
     @classmethod
     def from_bytes(cls, data):
         val = int(data[0])
@@ -26,50 +29,58 @@ class TypeS8:
 
 class TypeB8:
     length = 1
+    unpack_format = '?'
     @classmethod
     def from_bytes(cls, data):
         return bool(data[0])
 
 class TypeU16:
     length = 2
+    unpack_format = 'H'
     @classmethod
     def from_bytes(cls, data):
-        return int.from_bytes(data[:2], 'little')
+        return int.from_bytes(data[:2], 'big')
 
 class TypeS16:
     length = 2
+    unpack_format = 'h'
     @classmethod
     def from_bytes(cls, data):
-        val = int.from_bytes(data[:2], 'little')
+        val = int.from_bytes(data[:2], 'big')
         return val if val < 0x8000 else val - 0x10000
 
 class TypePtr16:
     length = 2
+    unpack_format = 'H'
     @classmethod
     def from_bytes(cls, data):
-        return int.from_bytes(data[:2], 'little')
+        return int.from_bytes(data[:2], 'big')
 
 class TypeU32:
     length = 4
+    unpack_format = 'I'
     @classmethod
     def from_bytes(cls, data):
-        return int.from_bytes(data[:4], 'little')
+        return int.from_bytes(data[:4], 'big')
 
 class TypeS32:
     length = 4
+    unpack_format = 'i'
     @classmethod
     def from_bytes(cls, data):
-        val = int.from_bytes(data[:4], 'little')
+        val = int.from_bytes(data[:4], 'big')
         return val if val < 0x80000000 else val - 0x100000000
 
 class TypeFloat32:
     length = 4
+    unpack_format = 'f'
     @classmethod
     def from_bytes(cls, data):
         return struct.unpack('<f', data[:4])[0]
 
 class TypeStr4:
     length = 4
+    unpack_format = '4s'
     @classmethod
     def from_bytes(cls, data):
         return data[:4].decode(errors='replace')
@@ -98,14 +109,16 @@ def decode_typecode(typecode):
     length = 0
 
     for i in range(4):
-        code = (typecode >> (i * 8)) & 0xFF
+        code = (typecode >> ((i) * 8)) & 0xFF
 
         if code == 0x00:
             break
 
         value_type = TYPE_MAP.get(code, None)
+
         if value_type is None:
             raise ValueError(f"Unknown type code: {code:02x}")
+
         length += value_type.length
         types.append(value_type)
 
@@ -118,7 +131,7 @@ class Log:
     Returns:
         _type_: _description_
     """
-    __slots__ = ('level', 'line', 'filename', 'fmt', 'payload_length', 'types')
+    __slots__ = ('level', 'line', 'filename', 'fmt', 'payload_length', 'types', 'decode_string')
 
     def __init__(self, level, line, filename, fmt, payload_length, types):
         self.level = level
@@ -127,6 +140,7 @@ class Log:
         self.fmt = fmt
         self.payload_length = payload_length
         self.types = types
+        self.decode_string = ''.join(t.unpack_format for t in types)
 
     @classmethod
     def from_elf_data(cls, data):
@@ -223,30 +237,18 @@ class ApplicationLogs:
         # The first byte is the log ID, the second byte is the payload length
         log_id = data[0]
 
+        # ID = 255 -> Overflow!
+        if log_id == 255:
+            entry =  Log(0, 0, "OVERRUN", "< ------------------ {} Logs lost ------------------ >", 1, [TypeU8])
+        elif log_id == 254:
+            entry =  Log(0, 0, "START", "#" * 79, 0, [])
         # Check if the log ID is valid
-        if log_id >= len(self.entries):
+        elif log_id >= len(self.entries):
             raise ValueError(f"Invalid log ID: {log_id}")
+        else:
+            entry = self.entries[log_id]
 
-        entry = self.entries[log_id]
-
-        offset = 1 # Use offset to avoid createing a new slice
-        values = []
-
-        # For each of the types, read the payload
-        for value_type in entry.types:
-            if len(data) < offset + value_type.length:
-                raise ValueError(f"Invalid payload length for log ID {log_id}: "
-                                 f"expected {value_type.length}, got {len(data) - offset}")
-            # Read the value from the data
-            value = value_type.from_bytes(data[offset:offset + value_type.length])
-            offset += value_type.length
-
-            values.append(value)
-
-        # If the payload length is not equal to the expected length, raise an error
-        if offset != len(data):
-            raise ValueError(f"Invalid payload length for log ID {log_id}: "
-                             f"expected {entry.payload_length}, got {offset}")
+        # Decode each value in the payload using the decode_string and unpack
+        values = struct.unpack("<" + entry.decode_string, data[1:])
 
         return entry, values
-

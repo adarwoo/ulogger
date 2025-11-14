@@ -2,7 +2,7 @@ import os
 import time
 import hashlib
 
-from elftools.elf.elffile import ELFFile
+from elftools.elf.elffile import ELFFile, ELFError
 
 from .messages import ControlMsg
 from .logs import ApplicationLogs
@@ -62,7 +62,7 @@ class Reader:
                 self.logs.reset(section)
 
             digest = sha256.hexdigest()
-        except OSError as open_exc:
+        except (ELFError, OSError) as open_exc:
             self.queue.put(ControlMsg.failed_to_read_elf(f"Failed to open the ELF file '{self.elf_path}'"))
             return
         else:

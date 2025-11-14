@@ -67,6 +67,8 @@ class Reader:
         while self.serial and not self._stop_event.is_set():
             try:
                 b = self.serial.read_until(EOF.to_bytes(), size=11520)
+                if len(b) == 0:
+                    continue
                 if len(b) < 2:
                     raise ValueError("Invalid COBS packet size")
                 # Timestamp at frame receive
@@ -76,7 +78,7 @@ class Reader:
                 log = LogEntry(meta, now, values)
             except ElfNotReady:
                 continue
-            except Exception:
+            except Exception as e:
                 if not self.bad_data:
                     self.queue.put(ControlMsg.BAD_DATA)
                     self.bad_data = True

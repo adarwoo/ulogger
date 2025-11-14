@@ -19,7 +19,7 @@ import datetime
 MAX_PRINTED_FILENAME_LENGTH = 20
 
 LOG_LEVELS = [
-    "ERROR", "WARN", "MILE", "TRACE", "INFO", "DEBUG0", "DEBUG1", "DEBUG2", "DEBUG3"
+    "ERROR", "WARN", "MILE", "INFO", "TRACE", "DEBUG0", "DEBUG1", "DEBUG2", "DEBUG3"
 ]
 
 DEBUG_COLOR = curses.COLOR_WHITE
@@ -211,8 +211,10 @@ class Viewer:
                 leftovers = ", ".join(str(a) for a in args[arg_index:])
                 self.pad.addstr(row, start_col, " " + leftovers, arg_highlight)
                 start_col += len(leftovers) + 1
-        except Exception:
-            self.pad.addstr(row, start_col, fmt_str, curses.color_pair(30) | curses.A_BOLD)
+        except Exception as e:
+            self.pad.addstr(
+                row, start_col, fmt_str, curses.color_pair(30) | curses.A_BOLD
+            )
 
     def draw_scrollbar(self, max_y, max_x):
             # Draw a simple vertical scrollbar on the right edge
