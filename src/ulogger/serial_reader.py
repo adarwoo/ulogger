@@ -2,7 +2,7 @@ import serial
 import threading
 import time
 
-from ulog_console.logs import ApplicationLogs, ElfNotReady, LogEntry
+from .logs import ElfNotReady, LogEntry
 from .messages import ControlMsg
 
 EOF = 0xA6  # COBS end of frame marker
@@ -30,6 +30,7 @@ def cobs_decode(encoded: bytearray) -> bytearray:
         index += code - 1
 
     return decoded
+
 
 class Reader:
     def __init__(self, args, queue, app_logs):
