@@ -1,5 +1,5 @@
 [project]
-name = "ulog-console"
+name = "ulogger"
 version = "1.0"
 description = ""
 authors = [
@@ -9,9 +9,11 @@ readme = "README.md"
 requires-python = ">=3.13.3,<3.14"
 dependencies = [
     "pyelftools (>=0.32,<0.33)",
-    "pycurses (>=0.0.37,<0.0.38)",
     "windows-curses (>=2.4.1,<3.0.0)",
-    "pyserial (>=3.5,<4.0)"
+    "pyserial (>=3.5,<4.0)",
+    "textual (>=6.1.0,<7.0.0)",
+    "mysqlite (>=0.0.0,<0.0.1)",
+    "sqlalchemy (>=2.0.43,<3.0.0)"
 ]
 
 [tool.poetry]
