@@ -1,4 +1,3 @@
-from sqlalchemy import event
 from sqlalchemy import create_engine
 from sqlalchemy import Integer, SmallInteger, Text, Float
 from sqlalchemy import ForeignKey, Index
@@ -8,6 +7,21 @@ from typing import Optional, List
 
 class Base(DeclarativeBase):
     pass
+
+class DebugSession(Base):
+    __tablename__ = 'debug_sessions'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    start_ts: Mapped[float] = mapped_column(Float, comment="Timestamp when debug session started (Unix epoch in seconds)")
+    elf_path: Mapped[Optional[str]] = mapped_column(Text, comment="Absolute path to the ELF file of the application being debugged")
+    elf_sha256: Mapped[bytes] = mapped_column(Text, comment="SHA256 digest of the ELF file")
+
+class VarTrait(Base):
+    __tablename__ = 'var_traits'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, unique=True)
+
 
 class LogLevel(Base):
     __tablename__ = 'log_levels'
@@ -34,7 +48,7 @@ class LogDef(Base):
 
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
     source_file: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('source_files.id'))
-    line: Mapped[int] = mapped_column(Integer)
+    line: Mapped[Optional[int]] = mapped_column(Integer)
     level: Mapped[int] = mapped_column(SmallInteger, ForeignKey('log_levels.level'))
     format: Mapped[str] = mapped_column(Text)
 
@@ -49,7 +63,7 @@ class VarDef(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     log_id: Mapped[int] = mapped_column(Integer, ForeignKey('log_defs.id'))
     name: Mapped[str] = mapped_column(Text)
-    trait: Mapped[str] = mapped_column(Text)
+    trait: Mapped[int] = mapped_column(SmallInteger, ForeignKey('var_traits.id'))
 
     # Relationships
     log_def: Mapped["LogDef"] = relationship("LogDef", back_populates="var_defs")
@@ -74,6 +88,7 @@ class VarValue(Base):
     __tablename__ = 'var_values'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    log_id: Mapped[int] = mapped_column(Integer, ForeignKey('logs.id'))
     var_def_id: Mapped[int] = mapped_column(Integer, ForeignKey('var_defs.id'))
     value_int: Mapped[Optional[int]] = mapped_column(Integer)
     value_real: Mapped[Optional[float]] = mapped_column(Float)
@@ -86,11 +101,31 @@ class VarValue(Base):
 Index('idx_logs_ts', Log.ts)                                 # range queries, scrolling UI
 Index('idx_logs_log_id', Log.log_id)                         # filter by type/definition
 Index('idx_logs_log_id_ts', Log.log_id, Log.ts)              # WHERE log_id=? ORDER BY ts
-Index('idx_var_values_log_ref', VarValue.log_ref)            # fetch vars for log
+Index('idx_var_values_log_id', VarValue.log_id)              # fetch vars for log
 Index('idx_var_values_var_def_id', VarValue.var_def_id)      # filter by variable type
 
-@event.listens_for(LogLevel.__table__, "after_create")
-def datafill_log_levels(target, connection, **kw):
+def populate_initial_data(connection):
+    """Populate initial data after all tables are created"""
+
+    # Insert var traits
+    connection.execute(
+        VarTrait.__table__.insert(),
+        [
+            {"id": 0x00, "name": "none"},
+            {"id": 0x10, "name": "uint8"},
+            {"id": 0x11, "name": "int8"},
+            {"id": 0x12, "name": "bool"},
+            {"id": 0x20, "name": "uint16"},
+            {"id": 0x21, "name": "int16"},
+            {"id": 0x22, "name": "pointer"},
+            {"id": 0x40, "name": "uint32"},
+            {"id": 0x41, "name": "int32"},
+            {"id": 0x42, "name": "float32"},
+            {"id": 0x43, "name": "string4"},
+        ],
+    )
+
+    # Insert log levels
     connection.execute(
         LogLevel.__table__.insert(),
         [
@@ -106,8 +141,6 @@ def datafill_log_levels(target, connection, **kw):
         ],
     )
 
-@event.listens_for(LogDef.__table__, "after_create")
-def datafill_log_defs(target, connection, **kw):
     # Insert the two internal log definitions
     connection.execute(
         LogDef.__table__.insert(),
@@ -136,18 +169,23 @@ def datafill_log_defs(target, connection, **kw):
             {
                 "log_id": 255,
                 "name": "lost_count",
-                "trait": "uint8"      # adjust if desired
+                "trait": 0x10
             }
         ]
     )
+
+    connection.commit()
 
 def create_database(database_url="sqlite:///ulog.db"):
     """Create the database and return session factory"""
     engine = create_engine(database_url, echo=False)
     Base.metadata.create_all(engine)
+
+    # Populate initial data
+    with engine.begin() as connection:
+        populate_initial_data(connection)
+
     Session = sessionmaker(bind=engine)
-    session = Session()
-    session.commit()
     return Session
 
 # Usage example:
