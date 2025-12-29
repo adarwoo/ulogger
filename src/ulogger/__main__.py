@@ -10,6 +10,8 @@ from .serial_reader import Reader as SerialReader
 
 def main():
     args = parse_args()
+    msg_queue = queue.Queue()
+    viewer = Viewer(msg_queue, args)
 
     try:
         elf_reader = ElfReader(args, msg_queue)

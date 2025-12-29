@@ -75,14 +75,18 @@ class Reader:
                 # Timestamp at frame receive
                 now = time.time()
                 decoded = cobs_decode(b)
-                meta, values = self.app_logs.decode_frame(decoded)
-                log = LogEntry(meta, now, values)
+                result = self.app_logs.decode_packet(decoded)
+
+                # Only queue complete log entries (decode_packet returns None for partial entries)
+                if result is not None:
+                    meta, values = result
+                    log = LogEntry(meta, now, values)
+                    self.queue.put(log)
+                    self.bad_data = False
             except ElfNotReady:
                 continue
             except Exception as e:
                 if not self.bad_data:
                     self.queue.put(ControlMsg.BAD_DATA)
                     self.bad_data = True
-            else:
-                self.bad_data = False
-                self.queue.put(log)
+            # Note: If result is None, we simply continue reading more packets

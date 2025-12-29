@@ -78,12 +78,16 @@ class TypeFloat32:
     def from_bytes(cls, data):
         return struct.unpack('<f', data[:4])[0]
 
-class TypeStr4:
-    length = 4
-    unpack_format = '4s'
+class TypeStr:
+    length = None  # Variable length
+    unpack_format = 's'  # Will be handled specially
     @classmethod
     def from_bytes(cls, data):
-        return data[:4].decode(errors='replace')
+        # Find null terminator, if present
+        null_idx = data.find(b'\x00')
+        if null_idx != -1:
+            return data[:null_idx].decode(errors='replace')
+        return data.decode(errors='replace')
 
 
 def decode_typecode(typecode):
@@ -93,23 +97,23 @@ def decode_typecode(typecode):
     """
     TYPE_MAP = {
         0x00: TypeNone,
-        0x10: TypeU8,
-        0x11: TypeS8,
-        0x12: TypeB8,
-        0x20: TypeU16,
-        0x21: TypeS16,
-        0x22: TypePtr16,
-        0x40: TypeU32,
-        0x41: TypeS32,
-        0x42: TypeFloat32,
-        0x43: TypeStr4
+        0x01: TypeU8,
+        0x02: TypeS8,
+        0x03: TypeB8,
+        0x04: TypeU16,
+        0x05: TypeS16,
+        0x06: TypePtr16,
+        0x07: TypeU32,
+        0x08: TypeS32,
+        0x09: TypeFloat32,
+        0x0A: TypeStr
     }
 
     types = []
     length = 0
 
-    for i in range(4):
-        code = (typecode >> ((i) * 8)) & 0xFF
+    for i in range(8):
+        code = (typecode >> ((i) * 4)) & 0x0F
 
         if code == 0x00:
             break
@@ -143,12 +147,12 @@ class Log:
         self.decode_string = ''.join(t.unpack_format for t in types)
 
     @classmethod
-    def from_elf_data(cls, data):
-        level = data[0]
-        line = int.from_bytes(data[1:5], 'little')
-        payload_length, types = decode_typecode(int.from_bytes(data[5:9], 'little'))
+    def from_elf_data(cls, data, endianness='little'):
+        level = int.from_bytes(data[0:4], endianness)
+        line = int.from_bytes(data[4:8], endianness)
+        payload_length, types = decode_typecode(int.from_bytes(data[8:12], endianness))
 
-        def read_cstr(offset=9, is_filename=True):
+        def read_cstr(offset=12, is_filename=True):
             start = offset
             while offset < len(data) and data[offset] != 0:
                 offset += 1
@@ -200,9 +204,20 @@ class ApplicationLogs:
     def __init__(self):
         self.entries = []
         self.elf_ready = False
+        self.endianness = 'little'  # Default to little-endian
+        # Packet reassembly state
+        self._pending_log_id = None
+        self._pending_args = []
+        self._pending_string_chunks = []  # For accumulating string data across packets
+        self._incomplete_log_queue = []  # Queue for incomplete log errors
 
-    def reset(self, section):
-        """Process a new .logs section."""
+    def reset(self, section, little_endian=True):
+        """Process a new .logs section.
+
+        Args:
+            section: The .logs section from the ELF file
+            little_endian: Boolean indicating if the ELF is little-endian (default: True)
+        """
         self.entries = [] # Reset the entries
         offset = 0
         data = section.data()
@@ -220,35 +235,108 @@ class ApplicationLogs:
 
         self.elf_ready = True
 
-    def decode_frame(self, data):
+    def decode_packet(self, data):
         """
-        Decode a serial data frame into a log entry.
+        Decode a single packet (one argument). Each log entry may span multiple packets.
         Args:
-            data (bytes): The raw data frame received from the serial port.
+            data (bytes): The raw packet data [log_id][arg_data]
         Returns:
-            A tuple of (Log, list of values) where:
-            - Log is the static log entry metadata.
-            - list of values is the decoded payload values.
+            Tuple of (Log, values) if log entry is complete, None if more packets needed
         """
+        # First, check if there's a queued incomplete log to return
+        if self._incomplete_log_queue:
+            return self._incomplete_log_queue.pop(0)
 
         if not self.elf_ready:
             raise ElfNotReady("ELF file not ready")
 
-        # The first byte is the log ID, the second byte is the payload length
-        log_id = data[0]
+        if len(data) < 1:
+            return None
 
-        # ID = 255 -> Overflow!
-        if log_id == 255:
-            entry =  Log(0, 0, "OVERRUN", "< ------------------ {} Logs lost ------------------ >", 1, [TypeU8])
-        elif log_id == 254:
-            entry =  Log(0, 0, "START", "#" * 79, 0, [])
-        # Check if the log ID is valid
+        log_id = data[0]
+        arg_data = data[1:] if len(data) > 1 else b''
+
+        # Handle special log IDs
+        if log_id == 255:  # Overflow
+            entry = Log(0, 0, "OVERRUN", "< ------------------ {} Logs lost ------------------ >", 1, [TypeU8])
+            count = struct.unpack('B', arg_data[:1])[0] if len(arg_data) >= 1 else 0
+            return (entry, (count,))
+        elif log_id == 254:  # Start
+            entry = Log(0, 0, "START", "#" * 79, 0, [])
+            return (entry, ())
         elif log_id >= len(self.entries):
             raise ValueError(f"Invalid log ID: {log_id}")
+
+        entry = self.entries[log_id]
+
+        # Check if this is a new log or continuation
+        if self._pending_log_id is not None and self._pending_log_id != log_id:
+            # New log ID before previous log completed - data loss!
+            # Queue an error entry for the incomplete log
+            prev_entry = self.entries[self._pending_log_id]
+            incomplete_entry = Log(0, 0, "INCOMPLETE",
+                                  f"Log ID {self._pending_log_id} ({prev_entry.filename}:{prev_entry.line}): expected {len(prev_entry.types)} args, got {len(self._pending_args)}",
+                                  0, [])
+            self._incomplete_log_queue.append((incomplete_entry, tuple(self._pending_args)))
+
+            # Reset state for new log and continue processing current packet
+            self._pending_log_id = log_id
+            self._pending_args = []
+            self._pending_string_chunks = []
+
+        elif self._pending_log_id != log_id:
+            # Starting a new log entry
+            self._pending_log_id = log_id
+            self._pending_args = []
+            self._pending_string_chunks = []
+
+        # Determine expected argument type
+        arg_idx = len(self._pending_args)
+        if arg_idx >= len(entry.types):
+            # All arguments received - reset and return
+            result = (entry, tuple(self._pending_args))
+            self._pending_log_id = None
+            self._pending_args = []
+            self._pending_string_chunks = []
+            return result
+
+        arg_type = entry.types[arg_idx]
+
+        # Handle string type (variable length, multi-packet)
+        if arg_type == TypeStr:
+            # Check if this packet contains null terminator
+            if b'\x00' in arg_data:
+                # String complete
+                self._pending_string_chunks.append(arg_data)
+                full_string_data = b''.join(self._pending_string_chunks)
+                string_value = TypeStr.from_bytes(full_string_data)
+                self._pending_args.append(string_value)
+                self._pending_string_chunks = []
+            else:
+                # More string data coming
+                self._pending_string_chunks.append(arg_data)
+                return None  # Need more packets
         else:
-            entry = self.entries[log_id]
+            # Fixed-size argument - decode directly
+            endian_prefix = '<' if self.endianness == 'little' else '>'
+            fmt = endian_prefix + arg_type.unpack_format
+            value = struct.unpack(fmt, arg_data[:arg_type.length])[0]
+            self._pending_args.append(value)
 
-        # Decode each value in the payload using the decode_string and unpack
-        values = struct.unpack("<" + entry.decode_string, data[1:])
+        # Check if all arguments received
+        if len(self._pending_args) == len(entry.types):
+            result = (entry, tuple(self._pending_args))
+            self._pending_log_id = None
+            self._pending_args = []
+            self._pending_string_chunks = []
+            return result
 
-        return entry, values
+        # More arguments expected
+        return None
+
+    def decode_frame(self, data):
+        """
+        Legacy method for backward compatibility.
+        Now delegates to decode_packet().
+        """
+        return self.decode_packet(data)

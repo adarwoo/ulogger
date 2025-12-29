@@ -59,7 +59,9 @@ class Reader:
                     return
 
                 # Read the section data (the elf file must still be opened)
-                self.logs.reset(section)
+                # Detect endianness from ELF header
+                little_endian = elf.little_endian
+                self.logs.reset(section, little_endian)
 
             digest = sha256.hexdigest()
         except (ELFError, OSError) as open_exc:
