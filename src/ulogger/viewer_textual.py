@@ -1,18 +1,20 @@
 """Textual-based TUI viewer for ulogger."""
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, RichLog, Static, OptionList
+from textual.widgets import Header, Footer, RichLog, Static, OptionList, ListView, ListItem, Label, Input, DirectoryTree
 from textual.widgets.option_list import Option
-from textual.screen import Screen
+from textual.screen import Screen, ModalScreen
 from textual.reactive import reactive
 from textual import work
 from textual.message import Message
 from rich.text import Text
 from queue import Empty
 import threading
+from pathlib import Path
 
 from .buffer import PersistantIndexCircularBuffer as Buffer
 from .messages import ControlMsg
 from .logs import LogEntry
+from .settings import get_settings
 
 # Log levels
 LOG_LEVELS = [
@@ -64,6 +66,504 @@ class StatusBar(Static):
         return text
 
 
+class ElfFileSelectionScreen(ModalScreen[str]):
+    """Modal screen for selecting ELF file from recent files or file system."""
+
+    CSS = """
+    ElfFileSelectionScreen {
+        align: center middle;
+        background: $background 80%;
+    }
+
+    #selection_container {
+        width: 80;
+        height: 25;
+        border: thick $primary;
+        background: $panel;
+        layout: vertical;
+    }
+
+    #selection_title {
+        height: 1;
+        content-align: center middle;
+        background: $primary;
+        color: $text;
+    }
+
+    #file_options {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.settings = get_settings()
+
+    def compose(self) -> ComposeResult:
+        """Create the file selection interface."""
+        from textual.containers import Container
+
+        with Container(id="selection_container"):
+            yield Static("Select ELF File", id="selection_title")
+            yield OptionList(id="file_options")
+
+    def on_mount(self) -> None:
+        """Populate the file list when mounted."""
+        option_list = self.query_one("#file_options", OptionList)
+
+        # Add "Browse for file..." option
+        browse_text = Text()
+        browse_text.append("📁 ", style="bold yellow")
+        browse_text.append("Browse for new file...", style="bold cyan")
+        option_list.add_option(Option(browse_text, id="__browse__"))
+
+        # Add separator
+        option_list.add_option(Option(Text("─" * 60, style="dim"), id="__separator__", disabled=True))
+
+        # Add recent files
+        recent_files = self.settings.get_recent_files()
+        if recent_files:
+            for filepath in recent_files:
+                path = Path(filepath)
+                text = Text()
+                text.append("📄 ", style="bold green")
+                text.append(path.name, style="white")
+                text.append(f"\n   {path.parent}", style="dim")
+                option_list.add_option(Option(text, id=filepath))
+        else:
+            option_list.add_option(Option(Text("No recent files", style="dim italic"), id="__none__", disabled=True))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Handle file selection."""
+        if event.option.id == "__browse__":
+            # Open file browser
+            from tkinter import Tk, filedialog
+            root = Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+
+            filepath = filedialog.askopenfilename(
+                title="Select ELF File",
+                filetypes=[("ELF files", "*.elf"), ("All files", "*.*")]
+            )
+            root.destroy()
+
+            if filepath:
+                self.dismiss(filepath)
+            else:
+                # User cancelled, just close the dialog
+                return
+        elif event.option.id not in ["__separator__", "__none__"]:
+            # Selected a recent file
+            self.dismiss(event.option.id)
+
+    def on_key(self, event) -> None:
+        """Handle keyboard events."""
+        if event.key == "escape" or event.key == "q":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+
+
+class ComPortSelectionScreen(ModalScreen[str]):
+    """Modal screen for selecting COM port."""
+
+    CSS = """
+    ComPortSelectionScreen {
+        align: center middle;
+        background: $background 80%;
+    }
+
+    #comport_container {
+        width: 60;
+        height: 20;
+        border: thick $primary;
+        background: $panel;
+        layout: vertical;
+    }
+
+    #comport_title {
+        height: 1;
+        content-align: center middle;
+        background: $primary;
+        color: $text;
+    }
+
+    #comport_options {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, current_port: str = None):
+        super().__init__()
+        self.current_port = current_port
+
+    def compose(self) -> ComposeResult:
+        """Create the COM port selection interface."""
+        from textual.containers import Container
+
+        with Container(id="comport_container"):
+            yield Static("Select COM Port", id="comport_title")
+            yield OptionList(id="comport_options")
+
+    def on_mount(self) -> None:
+        """Populate the COM port list when mounted."""
+        option_list = self.query_one("#comport_options", OptionList)
+
+        # Add "No COM port (offline mode)" option
+        no_port_text = Text()
+        no_port_text.append("⊗ ", style="bold yellow")
+        no_port_text.append("No COM port (offline mode)", style="dim italic")
+        option_list.add_option(Option(no_port_text, id="__none__"))
+
+        # Add separator
+        option_list.add_option(Option(Text("─" * 50, style="dim"), id="__separator__", disabled=True))
+
+        # Add available COM ports
+        from .settings import Settings
+        ports = Settings.list_comports()
+
+        if ports:
+            for port in ports:
+                text = Text()
+                if port == self.current_port:
+                    text.append("● ", style="bold green")
+                    text.append(port, style="bold white")
+                    text.append(" (current)", style="dim")
+                else:
+                    text.append("○ ", style="bold blue")
+                    text.append(port, style="white")
+                option_list.add_option(Option(text, id=port))
+        else:
+            option_list.add_option(Option(Text("No COM ports found", style="dim italic"), id="__empty__", disabled=True))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Handle COM port selection."""
+        if event.option.id == "__none__":
+            self.dismiss(None)
+        elif event.option.id not in ["__separator__", "__empty__"]:
+            self.dismiss(event.option.id)
+
+    def on_key(self, event) -> None:
+        """Handle keyboard events."""
+        if event.key == "escape" or event.key == "q":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+
+
+class LogEntriesViewScreen(Screen):
+    """Modal screen for displaying all log entry definitions from ELF."""
+
+    CSS = """
+    LogEntriesViewScreen {
+        align: center middle;
+        background: $background 20%;
+    }
+
+    #entries_container {
+        width: 95%;
+        height: 85%;
+        border: thick $primary;
+        background: $panel;
+        layout: vertical;
+    }
+
+    #search_input {
+        height: 1;
+        border: none;
+        background: $panel;
+        margin: 0 1;
+        display: none;
+    }
+
+    #entries_list {
+        height: 1fr;
+    }
+
+    #entries_footer {
+        height: 1;
+        background: $panel;
+        color: $text;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        ("s", "cycle_sort", "Sort"),
+        ("ctrl+f", "toggle_search", "Search"),
+        ("escape", "close_or_clear", "Close"),
+    ]
+
+    sort_mode = reactive("none")  # "none", "level", "file"
+    search_text = reactive("")
+
+    def __init__(self, elf_reader, filename=None, level=None):
+        super().__init__()
+        self.elf_reader = elf_reader
+        self.filename = filename
+        self.level = level
+        self.entries = []  # Store filtered entries for sorting/searching
+        self.search_active = False
+
+    def compose(self) -> ComposeResult:
+        """Create the log entries display."""
+        from textual.containers import Container
+
+        with Container(id="entries_container"):
+            yield Input(id="search_input", placeholder="Search in statements...")
+            yield RichLog(id="entries_list", highlight=True, markup=True)
+
+            # Add a custom footer inside the container
+            footer_text = Static("S: Sort | Ctrl+F: Search | Esc: Close", id="entries_footer")
+            yield footer_text
+
+    def on_mount(self) -> None:
+        """Populate the log entries list when mounted."""
+        self._update_title()
+        self._load_entries()
+        self._refresh_display()
+
+    def _update_title(self) -> None:
+        """Update the title based on filters and sort mode."""
+        title_parts = []
+
+        if self.filename and self.level is not None:
+            level_name = LOG_LEVELS[self.level] if self.level < len(LOG_LEVELS) else f"L{self.level}"
+            title_parts.append(f"{self.filename} - {level_name}")
+        elif self.filename:
+            title_parts.append(self.filename)
+        elif self.level is not None:
+            level_name = LOG_LEVELS[self.level] if self.level < len(LOG_LEVELS) else f"L{self.level}"
+            title_parts.append(level_name)
+        else:
+            title_parts.append("All Log Entry Definitions")
+
+        # Add sort indicator
+        if self.sort_mode == "level":
+            title_parts.append("Sort: Level")
+        elif self.sort_mode == "file":
+            title_parts.append("Sort: File")
+
+        container = self.query_one("#entries_container")
+        container.border_title = " | ".join(title_parts)
+
+    def _load_entries(self) -> None:
+        """Load and filter entries from ELF."""
+        self.entries = []
+
+        if not self.elf_reader or not self.elf_reader.logs.elf_ready:
+            return
+
+        for entry in self.elf_reader.logs.entries:
+            # Apply filters
+            if self.filename and entry.filename != self.filename:
+                continue
+            if self.level is not None and entry.level != self.level:
+                continue
+
+            self.entries.append(entry)
+
+    def _refresh_display(self) -> None:
+        """Refresh the display with current sort and search."""
+        log_widget = self.query_one("#entries_list", RichLog)
+        log_widget.clear()
+
+        if not self.elf_reader or not self.elf_reader.logs.elf_ready:
+            log_widget.write(Text("No ELF file loaded", style="red bold"))
+            return
+
+        # Sort entries
+        sorted_entries = self.entries.copy()
+        if self.sort_mode == "level":
+            sorted_entries.sort(key=lambda e: (e.level, e.filename, e.line))
+        elif self.sort_mode == "file":
+            sorted_entries.sort(key=lambda e: (e.filename, e.line, e.level))
+
+        # Filter by search text
+        if self.search_text:
+            search_lower = self.search_text.lower()
+            sorted_entries = [
+                e for e in sorted_entries
+                if search_lower in e.fmt.lower() or
+                   search_lower in e.filename.lower()
+            ]
+
+        # Display entries
+        if sorted_entries:
+            for entry in sorted_entries:
+                self._add_entry_line(log_widget, entry)
+        else:
+            if self.search_text:
+                log_widget.write(Text(f"No entries matching '{self.search_text}'", style="dim italic"))
+            else:
+                log_widget.write(Text("No log entries found matching criteria", style="dim italic"))
+
+    def _add_entry_line(self, log_widget: RichLog, entry) -> None:
+        """Add a formatted log entry definition line."""
+        level_str = LOG_LEVELS[entry.level] if entry.level < len(LOG_LEVELS) else f"L{entry.level}"
+        level_color = LEVEL_COLORS.get(entry.level, "white")
+        file_line = f"{entry.filename}:{entry.line}"
+
+        # Format the variable types - convert type objects to strings
+        if entry.types:
+            type_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in entry.types]
+            var_types = ', '.join(type_names)
+        else:
+            var_types = "none"
+
+        line = Text()
+        line.append(f"{level_str:8} ", style=level_color)
+        line.append(f"{file_line:35} ", style="blue")
+        line.append(f"{entry.fmt:60} ", style="white")
+        line.append(f"[{var_types}]", style="dim cyan")
+
+        log_widget.write(line)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle search input submission."""
+        self.search_text = event.value
+        self._refresh_display()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Handle search input changes (live search)."""
+        self.search_text = event.value
+        self._refresh_display()
+
+    def action_cycle_sort(self) -> None:
+        """Cycle through sort modes."""
+        if self.sort_mode == "none":
+            self.sort_mode = "level"
+        elif self.sort_mode == "level":
+            self.sort_mode = "file"
+        else:
+            self.sort_mode = "none"
+        self._update_title()
+        self._refresh_display()
+
+    def action_toggle_search(self) -> None:
+        """Toggle search input."""
+        search_input = self.query_one("#search_input", Input)
+        if self.search_active:
+            search_input.display = False
+            self.search_active = False
+            self.search_text = ""
+            self._refresh_display()
+        else:
+            search_input.display = True
+            self.search_active = True
+            search_input.focus()
+
+    def action_close_or_clear(self) -> None:
+        """Close search if active, otherwise close the screen."""
+        if self.search_active:
+            search_input = self.query_one("#search_input", Input)
+            search_input.display = False
+            self.search_active = False
+            self.search_text = ""
+            self._refresh_display()
+        else:
+            self.dismiss()
+
+    def on_key(self, event) -> None:
+        """Handle keyboard events."""
+        # Allow on_key as fallback for any keys not handled by actions
+        pass
+
+
+class LogLineListScreen(Screen):
+    """Modal screen for displaying filtered log lines."""
+
+    CSS = """
+    LogLineListScreen {
+        align: center middle;
+        background: $background 20%;
+    }
+
+    LogLineListScreen > RichLog {
+        width: 90%;
+        height: 80%;
+        border: thick $primary;
+        background: $panel;
+    }
+    """
+
+    def __init__(self, log_buffer, buffer_lock, filename=None, level=None, parent_viewer=None):
+        super().__init__()
+        self.log_buffer = log_buffer
+        self.buffer_lock = buffer_lock
+        self.filename = filename
+        self.level = level
+        self.parent_viewer = parent_viewer
+
+    def compose(self) -> ComposeResult:
+        """Create the log display."""
+        # Create title based on filters
+        if self.filename and self.level is not None:
+            level_name = LOG_LEVELS[self.level] if self.level < len(LOG_LEVELS) else f"L{self.level}"
+            title = f"Logs: {self.filename} - {level_name}"
+        elif self.filename:
+            title = f"Logs: {self.filename}"
+        elif self.level is not None:
+            level_name = LOG_LEVELS[self.level] if self.level < len(LOG_LEVELS) else f"L{self.level}"
+            title = f"Logs: {level_name}"
+        else:
+            title = "All Logs"
+
+        log_widget = RichLog(id="line_list", highlight=True, markup=True)
+        log_widget.border_title = title
+        yield log_widget
+
+    def on_mount(self) -> None:
+        """Populate the log list when mounted."""
+        log_widget = self.query_one("#line_list", RichLog)
+
+        with self.buffer_lock:
+            count = 0
+            for entry in self.log_buffer.latest_slice(10000):
+                # Apply filters
+                if self.filename and entry.filename != self.filename:
+                    continue
+                if self.level is not None and entry.level != self.level:
+                    continue
+
+                # Format and add line
+                self._add_log_line(log_widget, entry)
+                count += 1
+
+            if count == 0:
+                log_widget.write(Text("No logs found matching criteria", style="dim italic"))
+
+    def _add_log_line(self, log_widget: RichLog, entry: LogEntry) -> None:
+        """Add a formatted log line."""
+        if self.parent_viewer:
+            # Use parent's formatting methods
+            ts_str = self.parent_viewer.format_time(entry.timestamp)
+            message = self.parent_viewer.format_message(entry.fmt, entry.data)
+        else:
+            ts_str = f"{entry.timestamp:.4f}"
+            message = f"{entry.fmt} {entry.data}" if entry.data else entry.fmt
+
+        level_str = LOG_LEVELS[entry.level] if entry.level < len(LOG_LEVELS) else f"L{entry.level}"
+        level_color = LEVEL_COLORS.get(entry.level, "white")
+        file_line = f"{entry.filename}:{entry.line}"
+
+        line = Text()
+        line.append(f"{ts_str} ", style="cyan")
+        line.append(f"{level_str:8} ", style=level_color)
+        line.append(f"{file_line:30} ", style="blue")
+        line.append(message, style=level_color)
+
+        log_widget.write(line)
+
+    def on_key(self, event) -> None:
+        """Handle keyboard events."""
+        if event.key == "escape" or event.key == "q":
+            event.prevent_default()
+            event.stop()
+            self.dismiss()
+
+
 class FileFilterScreen(Screen):
     """Modal screen for selecting file filter."""
 
@@ -74,7 +574,7 @@ class FileFilterScreen(Screen):
     }
 
     FileFilterScreen > OptionList {
-        width: 70;
+        width: 80;
         height: auto;
         max-height: 20;
         border: thick $primary;
@@ -93,18 +593,26 @@ class FileFilterScreen(Screen):
         option_list = OptionList(id="file_list")
 
         # Calculate total logs
-        total_logs = sum(self.file_counts.values())
+        total_logs = sum(info['total'] for info in self.file_counts.values())
+
+        # Add "None" option
+        from rich.text import Text
+        text = Text()
+        text.append("[None]", style="bold red")
+        text.append(" (hide all)", style="dim")
+        option_list.add_option(Option(text, id="__none__"))
 
         # Add "Show all" option
-        from rich.text import Text
         text = Text()
         text.append("[Show all]", style="bold cyan")
         text.append(f" ({total_logs} logs)", style="dim")
         option_list.add_option(Option(text, id="__all__"))
 
-        # Add each file with tick/cross indicator
+        # Add each file with tick/cross indicator and level breakdown
         for filename in sorted(self.file_counts.keys()):
-            count = self.file_counts[filename]
+            file_info = self.file_counts[filename]
+            total_count = file_info['total']
+            level_counts = file_info['levels']
 
             if filename in self.selected_files:
                 indicator = "✓"
@@ -113,16 +621,41 @@ class FileFilterScreen(Screen):
                 indicator = "✗"
                 indicator_color = "red"
 
+            # Truncate filename to 20 chars
+            display_name = filename[:20] if len(filename) <= 20 else filename[:17] + "..."
+
             text = Text()
             text.append(indicator, style=f"bold {indicator_color}")
-            text.append(f" {filename}", style="white")
-            text.append(f" ({count} logs)", style="dim")
+            text.append(f" {display_name:<20}", style="white")  # Left-aligned, padded to 20 chars
+            text.append(f" ({total_count:4d}: ", style="dim")
+
+            # Add color-coded counts in fixed order (E W M I D) for alignment, hide zeros
+            for i, level_idx in enumerate(range(len(LOG_LEVELS))):
+                if i > 0:
+                    text.append(" ", style="dim")
+                count = level_counts.get(level_idx, 0)
+                level_color = LEVEL_COLORS.get(level_idx, "white")
+                if count > 0:
+                    text.append(f"{count:3d}", style=level_color)
+                else:
+                    text.append("   ", style="dim")  # Blank space for alignment
+
+            text.append(")", style="dim")
             option_list.add_option(Option(text, id=filename))
 
         yield option_list
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Handle file selection and apply immediately."""
+        if event.option.id == "__none__":
+            # Disable all files
+            self.selected_files = set()
+            if self.parent_viewer:
+                self.parent_viewer.filter_files = set()  # Empty set means show nothing
+                self.parent_viewer.post_message(self.parent_viewer.RefreshTable())
+            # Don't dismiss - let user continue selecting
+            return
+
         if event.option.id == "__all__":
             # Enable all files
             self.selected_files = set(self.file_counts.keys())
@@ -159,24 +692,83 @@ class FileFilterScreen(Screen):
             indicator = "✗"
             indicator_color = "red"
 
-        count = self.file_counts[filename]
+        file_info = self.file_counts[filename]
+        total_count = file_info['total']
+        level_counts = file_info['levels']
+
+        # Truncate filename to 20 chars
+        display_name = filename[:20] if len(filename) <= 20 else filename[:17] + "..."
+
         from rich.text import Text
         text = Text()
         text.append(indicator, style=f"bold {indicator_color}")
-        text.append(f" {filename}", style="white")
-        text.append(f" ({count} logs)", style="dim")
+        text.append(f" {display_name:<20}", style="white")  # Left-aligned, padded to 20 chars
+        text.append(f" ({total_count:4d}: ", style="dim")
 
+        # Add color-coded counts in fixed order (E W M I D) for alignment, hide zeros
+        for i, level_idx in enumerate(range(len(LOG_LEVELS))):
+            if i > 0:
+                text.append(" ", style="dim")
+            count = level_counts.get(level_idx, 0)
+            level_color = LEVEL_COLORS.get(level_idx, "white")
+            if count > 0:
+                text.append(f"{count:3d}", style=level_color)
+            else:
+                text.append("   ", style="dim")  # Blank space for alignment
+
+        text.append(")", style="dim")
+
+        # Update the option in the list
         option_list.replace_option_prompt_at_index(
             event.option_index,
             text
         )
+        event.stop()
+        # Don't dismiss - let user continue selecting
 
     def on_key(self, event) -> None:
-        """Handle escape key to cancel."""
+        """Handle keyboard events."""
         if event.key == "escape" or event.key == "q":
             event.prevent_default()
             event.stop()
             self.dismiss(self.selected_files)
+        elif event.key == "enter":
+            # Show all logs for currently highlighted file
+            option_list = self.query_one("#file_list", OptionList)
+            highlighted = option_list.highlighted
+            if highlighted is not None:
+                option = option_list.get_option_at_index(highlighted)
+                if option.id not in ["__none__", "__all__"]:
+                    filename = option.id
+                    if self.parent_viewer:
+                        self.app.push_screen(
+                            LogLineListScreen(
+                                self.parent_viewer.log_buffer,
+                                self.parent_viewer.buffer_lock,
+                                filename=filename,
+                                parent_viewer=self.parent_viewer
+                            )
+                        )
+        elif event.key in "0123456789":
+            # Show logs for currently highlighted file at specific level
+            level_idx = int(event.key)
+            if level_idx < len(LOG_LEVELS):
+                option_list = self.query_one("#file_list", OptionList)
+                highlighted = option_list.highlighted
+                if highlighted is not None:
+                    option = option_list.get_option_at_index(highlighted)
+                    if option.id not in ["__none__", "__all__"]:
+                        filename = option.id
+                        if self.parent_viewer:
+                            self.app.push_screen(
+                                LogLineListScreen(
+                                    self.parent_viewer.log_buffer,
+                                    self.parent_viewer.buffer_lock,
+                                    filename=filename,
+                                    level=level_idx,
+                                    parent_viewer=self.parent_viewer
+                                )
+                            )
 
 
 class LevelFilterScreen(Screen):
@@ -308,7 +900,10 @@ class LogViewer(App):
         ("plus", "expand_level_filter", "Add Level"),
         ("minus", "contract_level_filter", "Remove Level"),
         ("f", "toggle_file_filter", "File Filter"),
+        ("p", "select_com_port", "COM Port"),
         ("r", "reset_filters", "Reset Filters"),
+        ("e", "view_log_entries", "View Log Entries"),
+        ("v", "view_all_lines", "View All Lines"),
         ("up", "scroll_up", "Scroll Up"),
         ("down", "scroll_down", "Scroll Down"),
         ("pageup", "page_up", "Page Up"),
@@ -317,7 +912,7 @@ class LogViewer(App):
         ("end", "scroll_end", "Bottom"),
     ]
 
-    def __init__(self, queue, args):
+    def __init__(self, queue, args, start_readers_callback=None):
         super().__init__()
         self.queue = queue
         self.args = args
@@ -333,6 +928,7 @@ class LogViewer(App):
         self.running = True
         self.serial_reader = None
         self.elf_reader = None
+        self.start_readers_callback = start_readers_callback
 
         # Filter settings
         self.filter_levels = set(range(len(LOG_LEVELS)))  # Set of level indices to show (default: all)
@@ -350,14 +946,124 @@ class LogViewer(App):
         log_widget = self.query_one("#log_table", RichLog)
         log_widget.can_focus = True
 
-        # Update status bar
+        # Load COM port from settings if not provided on command line
+        settings = get_settings()
+        if not self.comm_port:
+            self.comm_port = settings.get_com_port()
+        else:
+            # Save command line COM port to settings
+            settings.set_com_port(self.comm_port)
+
+        # Update args
+        self.args.comm = self.comm_port
+
+        # Update status bar and title
         status = self.query_one("#status_bar", StatusBar)
-        status.comm_port = self.comm_port
-        status.elf_file = self.elf_file
+        status.comm_port = self.comm_port or "No port"
+        status.elf_file = Path(self.elf_file).name if self.elf_file else ""
         status.elf_status = self.elf_status
 
-        # Start background worker to poll queue
+        # Update title to include COM port
+        self.title = f"uLogger - {self.comm_port or 'No port'}"
+
+        # Start background worker to poll queue (always needed)
         self.poll_queue()
+
+        # If no COM port selected, show selection dialog first
+        if not self.comm_port:
+            self.show_com_port_selection()
+        # If no ELF file provided, show selection dialog
+        elif not self.args.elf:
+            self.show_file_selection()
+
+    def show_file_selection(self) -> None:
+        """Show the ELF file selection dialog."""
+        def handle_selection(filepath: str) -> None:
+            if filepath:
+                # Update args with selected file
+                self.args.elf = filepath
+                self.elf_file = filepath
+                self.comm_port = self.args.comm or ""
+
+                # Add to recent files
+                from .settings import get_settings
+                settings = get_settings()
+                settings.add_recent_file(filepath)
+
+                # Update status bar immediately
+                status = self.query_one("#status_bar", StatusBar)
+                status.elf_file = Path(filepath).name
+                status.comm_port = self.comm_port
+
+                # Use the callback to start readers (from main)
+                if self.start_readers_callback:
+                    success = self.start_readers_callback(self.args, self.queue, self)
+                    if not success:
+                        self.notify("Failed to start readers", severity="error", timeout=5)
+                else:
+                    self.notify("No reader callback available", severity="error", timeout=5)
+            else:
+                # User cancelled
+                self.notify("No file selected. Exiting.", timeout=2)
+                self.exit()
+
+        self.push_screen(ElfFileSelectionScreen(), callback=handle_selection)
+
+    def show_com_port_selection(self) -> None:
+        """Show the COM port selection dialog."""
+        def handle_selection(port: str | None) -> None:
+            if port is not None:
+                # Save to settings
+                from .settings import get_settings
+                settings = get_settings()
+                settings.set_com_port(port)
+
+                # Update local state
+                old_port = self.comm_port
+                self.comm_port = port
+                self.args.comm = port
+
+                # Update status bar and title
+                status = self.query_one("#status_bar", StatusBar)
+                status.comm_port = port or "No port"
+                self.title = f"uLogger - {port or 'No port'}"
+
+                # If port changed and we're already running, restart serial reader
+                if old_port != port and self.elf_file:
+                    self.restart_serial_reader()
+                    self.notify(f"COM port changed to {port or 'offline mode'}", timeout=3)
+
+                # After setting COM port, check if we need to select ELF file
+                if not self.args.elf:
+                    self.show_file_selection()
+
+        self.push_screen(ComPortSelectionScreen(), callback=handle_selection)
+
+    def restart_serial_reader(self) -> None:
+        """Restart the serial reader with the new COM port."""
+        # Stop the existing serial reader if it exists
+        if hasattr(self, 'serial_reader_thread') and self.serial_reader_thread:
+            if hasattr(self, 'serial_reader') and self.serial_reader:
+                # Signal the reader to stop
+                self.serial_reader.stop()
+                # Wait for thread to finish
+                self.serial_reader_thread.join(timeout=2)
+
+        # Start new serial reader if we have a port
+        if self.comm_port and self.elf_file:
+            from .serial_reader import SerialReader
+            import threading
+
+            self.serial_reader = SerialReader(self.comm_port, self.elf_file, self.queue)
+            self.serial_reader_thread = threading.Thread(target=self.serial_reader.read_loop, daemon=True)
+            self.serial_reader_thread.start()
+            self.notify(f"Serial reader started on {self.comm_port}", timeout=2)
+        else:
+            self.notify("Serial reader stopped (offline mode)", timeout=2)
+
+    def action_select_com_port(self) -> None:
+        """Show COM port selection dialog."""
+        self.show_com_port_selection()
 
     def on_key(self, event) -> None:
         """Handle key presses at the app level."""
@@ -426,12 +1132,20 @@ class LogViewer(App):
         self.call_from_thread(_update)
 
     def get_file_counts(self) -> dict:
-        """Get dictionary of files with their log entry counts from ELF."""
+        """Get dictionary of files with their log entry counts and level breakdown from ELF.
+
+        Returns: dict[filename] = {'total': int, 'levels': {level_idx: count}}
+        """
         if self.elf_reader and self.elf_reader.logs.elf_ready:
             counts = {}
             for entry in self.elf_reader.logs.entries:
                 filename = entry.filename
-                counts[filename] = counts.get(filename, 0) + 1
+                if filename not in counts:
+                    counts[filename] = {'total': 0, 'levels': {}}
+
+                counts[filename]['total'] += 1
+                level = entry.level
+                counts[filename]['levels'][level] = counts[filename]['levels'].get(level, 0) + 1
             return counts
         return {}
 
@@ -664,6 +1378,26 @@ class LogViewer(App):
         self.filter_levels = set(range(len(LOG_LEVELS)))  # Show all levels
         self.filter_files = None  # Show all files
         self.refresh_table()
+
+    def action_view_log_entries(self) -> None:
+        """Show all log entry definitions from ELF."""
+        if not self.elf_reader or not self.elf_reader.logs.elf_ready:
+            self.notify("No ELF file loaded yet", severity="warning", timeout=2)
+            return
+
+        self.push_screen(
+            LogEntriesViewScreen(self.elf_reader)
+        )
+
+    def action_view_all_lines(self) -> None:
+        """Show all log lines in a modal view."""
+        self.push_screen(
+            LogLineListScreen(
+                self.log_buffer,
+                self.buffer_lock,
+                parent_viewer=self
+            )
+        )
 
     def action_toggle_freeze(self) -> None:
         """Toggle freeze state."""
