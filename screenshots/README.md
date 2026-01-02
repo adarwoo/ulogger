@@ -71,7 +71,7 @@ This guide will help you capture professional screenshots for the README.
 Use these exact names for consistency:
 - `main_view.png` - Main logging interface
 - `file_filter.png` - File filter dialog
-- `level_filter.png` - Level filter dialog  
+- `level_filter.png` - Level filter dialog
 - `log_entries.png` - Log entries viewer
 - `com_port_selection.png` - COM port dialog
 - `search_feature.png` - Search functionality
@@ -110,7 +110,7 @@ Once you have the screenshots:
 ### File Filter
 ![File Filter](screenshots/file_filter.png)
 
-### Level Filter  
+### Level Filter
 ![Level Filter](screenshots/level_filter.png)
 
 ### Log Entries Viewer

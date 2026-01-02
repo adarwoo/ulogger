@@ -59,22 +59,34 @@ ulogger firmware.elf -C COM4
 ### Main Interface
 *Real-time log viewing with color-coded levels and filtering*
 
-<!-- Screenshot: Main view showing live logs with different levels -->
-![Main View - Coming Soon](https://via.placeholder.com/1200x800/1e1e1e/00ff00?text=Main+View+Screenshot+Coming+Soon)
+![Main View](screenshots/logs%20view.svg)
 
 ### File Filter
 *Filter logs by source file with per-level counts*
 
-<!-- Screenshot: File filter dialog showing files with checkmarks and counts -->
-![File Filter - Coming Soon](https://via.placeholder.com/800x600/1e1e1e/00ff00?text=File+Filter+Screenshot+Coming+Soon)
+![File Filter](screenshots/file%20filter%20view.svg)
+
+### Level Filter
+*Select which log levels to display*
+
+![Level Filter](screenshots/level%20filter%20view.svg)
 
 ### Log Entries Viewer
 *Browse all log definitions from the ELF file with sort and search*
 
-<!-- Screenshot: Log entries viewer with file:line, format, and variables -->
-![Log Entries - Coming Soon](https://via.placeholder.com/1200x800/1e1e1e/00ff00?text=Log+Entries+Viewer+Screenshot+Coming+Soon)
+![Log Entries](screenshots/all%20logs%20view.svg)
 
-> 💡 **Tip:** See `screenshots/README.md` for instructions on capturing and updating screenshots.
+### File Selection
+*Select ELF file from recent files or browse*
+
+![ELF File Selection](screenshots/elf%20file%20selection%20view.svg)
+
+### COM Port Selection
+*Choose serial port for live logging*
+
+![Port Selection](screenshots/port%20selection%20view.svg)
+
+> 💡 **Note:** Screenshots captured using Textual's built-in SVG export feature for crisp, scalable images.
 
 ## Usage
 
@@ -230,17 +242,17 @@ ULog uses a clever approach different from other logging libraries:
 
 ### Benefits
 
-✅ **No preprocessing required** - Unlike Trice, no JSON extraction needed  
-✅ **Tiny footprint** - 100 debug statements cost < 1KB flash  
-✅ **No code intrusion** - Linker script patch optional  
-✅ **Smart filtering** - Viewer knows all possible traces upfront  
-✅ **Type-safe** - Variable types extracted from ELF, no format strings needed  
+✅ **No preprocessing required** - Unlike Trice, no JSON extraction needed
+✅ **Tiny footprint** - 100 debug statements cost < 1KB flash
+✅ **No code intrusion** - Linker script patch optional
+✅ **Smart filtering** - Viewer knows all possible traces upfront
+✅ **Type-safe** - Variable types extracted from ELF, no format strings needed
 
 ## 📦 Dependencies
 
 ### Runtime
 - `textual >= 0.96.1` - Modern TUI framework
-- `pyserial >= 3.5` - Serial port communication  
+- `pyserial >= 3.5` - Serial port communication
 - `platformdirs >= 4.0.0` - Cross-platform settings storage
 - `pyelftools >= 0.31` - ELF file parsing
 - `sqlalchemy >= 2.0.0` - Database models
