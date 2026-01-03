@@ -1,6 +1,6 @@
 [project]
 name = "adarwoo-ulogger"
-version = "1.1.0"
+version = "1.2.0"
 description = "Modern terminal-based viewer for ULog embedded traces with real-time serial monitoring"
 authors = [
     {name = "adarwoo",email = "44254473+adarwoo@users.noreply.github.com"}
