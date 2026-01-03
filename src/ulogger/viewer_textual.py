@@ -1,6 +1,6 @@
 """Textual-based TUI viewer for ulogger."""
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, RichLog, Static, OptionList, ListView, ListItem, Label, Input, DirectoryTree
+from textual.widgets import Footer, RichLog, Static, OptionList, Input
 from textual.widgets.option_list import Option
 from textual.screen import Screen, ModalScreen
 from textual.reactive import reactive
@@ -10,6 +10,7 @@ from rich.text import Text
 from queue import Empty
 import threading
 from pathlib import Path
+import time
 
 from .buffer import PersistantIndexCircularBuffer as Buffer
 from .messages import ControlMsg
@@ -35,6 +36,47 @@ LEVEL_COLORS = {
     7: "dim white",     # DEBUG2
     8: "dim",           # DEBUG3
 }
+
+
+class LevelIndicatorHeader(Static):
+    """Custom header showing active log levels."""
+
+    active_levels = reactive(set())
+    comm_port = reactive("")
+
+    def render(self) -> Text:
+        """Render the header with level indicators and version."""
+        text = Text()
+        text.append("uLogger v1.1.0", style="bold cyan")
+
+        # Add COM port if available
+        if self.comm_port:
+            text.append(" | ", style="dim")
+            text.append(f"Port: {self.comm_port}", style="green")
+
+        text.append(" | Levels: ", style="dim")
+
+        # Show each level with appropriate letter
+        for i, level_name in enumerate(LOG_LEVELS):
+            # Use digit for DEBUG levels, first letter for others
+            if level_name.startswith("DEBUG"):
+                display_char = level_name[-1]  # Get the digit (0, 1, 2, 3)
+            else:
+                display_char = level_name[0]  # E, W, M, I, T
+
+            if i in self.active_levels:
+                # Active - show in level color
+                color = LEVEL_COLORS.get(i, "white")
+                text.append(display_char, style=f"bold {color}")
+            else:
+                # Inactive - show in dark grey
+                text.append(display_char, style="rgb(60,60,60)")
+
+            # Add space between letters
+            if i < len(LOG_LEVELS) - 1:
+                text.append(" ", style="")
+
+        return text
 
 
 class StatusBar(Static):
@@ -878,6 +920,14 @@ class LogViewer(App):
         background: $surface;
     }
 
+    LevelIndicatorHeader {
+        dock: top;
+        height: 1;
+        background: $panel;
+        color: $text;
+        content-align: center middle;
+    }
+
     StatusBar {
         dock: bottom;
         height: 1;
@@ -894,12 +944,12 @@ class LogViewer(App):
     BINDINGS = [
         ("q", "request_quit", "Quit"),
         ("ctrl+c", "request_quit", "Quit"),
-        ("z", "toggle_freeze", "Freeze/Unfreeze"),
+        ("space", "toggle_freeze", "Freeze/Unfreeze"),
         ("c", "clear", "Clear"),
-        ("l", "show_level_filter", "Level Filter"),
-        ("plus", "expand_level_filter", "Add Level"),
-        ("minus", "contract_level_filter", "Remove Level"),
-        ("f", "toggle_file_filter", "File Filter"),
+        ("l", "show_level_filter", "Levels"),
+        ("plus", "expand_level_filter", "More"),
+        ("minus", "contract_level_filter", "Less"),
+        ("f", "toggle_file_filter", "Files"),
         ("p", "select_com_port", "COM Port"),
         ("r", "reset_filters", "Reset Filters"),
         ("e", "view_log_entries", "View Log Entries"),
@@ -934,9 +984,15 @@ class LogViewer(App):
         self.filter_levels = set(range(len(LOG_LEVELS)))  # Set of level indices to show (default: all)
         self.filter_files = None  # None means show all files, otherwise set of filenames
 
+        # Performance optimization: throttled refresh
+        self.pending_refresh = False
+        self.last_refresh_time = 0
+        self.min_refresh_interval = 0.05  # 20 FPS max
+        self.last_displayed_index = -1  # Track last rendered entry for incremental updates
+
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
-        yield Header()
+        yield LevelIndicatorHeader(id="level_header")
         yield RichLog(id="log_table", highlight=True, markup=True)
         yield StatusBar(id="status_bar")
         yield Footer()
@@ -962,6 +1018,11 @@ class LogViewer(App):
         status.comm_port = self.comm_port or "No port"
         status.elf_file = Path(self.elf_file).name if self.elf_file else ""
         status.elf_status = self.elf_status
+
+        # Update level indicator and header
+        level_header = self.query_one("#level_header", LevelIndicatorHeader)
+        level_header.comm_port = self.comm_port or "No port"
+        self._update_level_indicator()
 
         # Update title to include COM port
         self.title = f"uLogger - {self.comm_port or 'No port'}"
@@ -1026,6 +1087,11 @@ class LogViewer(App):
                 # Update status bar and title
                 status = self.query_one("#status_bar", StatusBar)
                 status.comm_port = port or "No port"
+
+                # Update header
+                level_header = self.query_one("#level_header", LevelIndicatorHeader)
+                level_header.comm_port = port or "No port"
+
                 self.title = f"uLogger - {port or 'No port'}"
 
                 # If port changed and we're already running, restart serial reader
@@ -1071,7 +1137,7 @@ class LogViewer(App):
             event.prevent_default()
             event.stop()
             self.action_request_quit()
-        elif event.key == "z":
+        elif event.key == "space":
             event.prevent_default()
             event.stop()
             self.action_toggle_freeze()
@@ -1131,6 +1197,11 @@ class LogViewer(App):
 
         self.call_from_thread(_update)
 
+    def _update_level_indicator(self) -> None:
+        """Update the level indicator header with current active levels."""
+        level_header = self.query_one("#level_header", LevelIndicatorHeader)
+        level_header.active_levels = self.filter_levels.copy()
+
     def get_file_counts(self) -> dict:
         """Get dictionary of files with their log entry counts and level breakdown from ELF.
 
@@ -1163,34 +1234,97 @@ class LogViewer(App):
         return True
 
     def add_log_entry(self, entry: LogEntry) -> None:
-        """Add a log entry to the buffer and table."""
+        """Add a log entry to the buffer and request refresh (throttled)."""
         with self.buffer_lock:
-
-
             self.log_buffer.append(entry)
 
             # Only update display if not frozen
             if not self.frozen:
-                self.post_message(self.RefreshTable())
+                # Always request a refresh - the message system will handle throttling
+                # by coalescing RefreshTable messages
+                current_time = time.time()
+
+                # Only post a new refresh message if enough time has passed since last refresh
+                # OR if we don't have a pending refresh scheduled
+                if (current_time - self.last_refresh_time) >= self.min_refresh_interval:
+                    # Enough time has passed, trigger immediate refresh
+                    self.last_refresh_time = current_time
+                    self.post_message(self.RefreshTable())
+                elif not self.pending_refresh:
+                    # Schedule a delayed refresh for the next interval
+                    self.pending_refresh = True
+                    self.set_timer(self.min_refresh_interval, self._trigger_refresh)
+
+    def _trigger_refresh(self) -> None:
+        """Timer callback to trigger a refresh."""
+        self.pending_refresh = False  # Clear flag before triggering
+        current_time = time.time()
+        self.last_refresh_time = current_time
+        self.post_message(self.RefreshTable())
 
     def refresh_table(self) -> None:
-        """Refresh the entire log widget from the buffer."""
+        """Refresh the log widget - incrementally if possible, full rebuild if needed."""
+        # Note: Don't clear pending_refresh here - it's cleared in _trigger_refresh
         log_widget = self.query_one("#log_table", RichLog)
 
         with self.buffer_lock:
-            # Clear and rebuild log
-            log_widget.clear()
+            current_tail = self.log_buffer.tail_abs_index()
 
-            displayed = 0
-            for entry in self.log_buffer.latest_slice(1000):  # Show last 1000 entries
-                if self.passes_filter(entry):
-                    self.add_log_line(log_widget, entry)
-                    displayed += 1
+            # Determine if we can do incremental update or need full rebuild
+            # Full rebuild needed if:
+            # - We've never rendered before (last_displayed_index == -1)
+            # - Buffer wrapped around and lost our last position
+            # - There are more than 1000 new entries (simpler to rebuild)
+            can_incremental = (
+                self.last_displayed_index >= 0 and
+                current_tail is not None and
+                self.log_buffer.head_abs_index() <= self.last_displayed_index and
+                (current_tail - self.last_displayed_index) < 1000
+            )
 
-            # Update status
-            status = self.query_one("#status_bar", StatusBar)
-            status.log_count = len(self.log_buffer)
-            status.filter_info = self._get_filter_info(displayed)
+            if can_incremental:
+                # Incremental update: only add new entries
+                new_entries_count = current_tail - self.last_displayed_index
+                if new_entries_count > 0:
+                    # Get only the new entries
+                    new_entries = self.log_buffer.slice_by_abs_index(
+                        self.last_displayed_index + 1,
+                        new_entries_count
+                    )
+
+                    displayed = 0
+                    for entry in new_entries:
+                        if self.passes_filter(entry):
+                            self.add_log_line(log_widget, entry)
+                            displayed += 1
+
+                    self.last_displayed_index = current_tail
+
+                    # Update status
+                    status = self.query_one("#status_bar", StatusBar)
+                    status.log_count = len(self.log_buffer)
+                    if displayed > 0:
+                        # Only update filter info if we displayed something
+                        # (to avoid recalculating total displayed count)
+                        pass
+            else:
+                # Full rebuild needed
+                log_widget.clear()
+                self.last_displayed_index = -1
+
+                displayed = 0
+                for entry in self.log_buffer.latest_slice(1000):  # Show last 1000 entries
+                    if self.passes_filter(entry):
+                        self.add_log_line(log_widget, entry)
+                        displayed += 1
+
+                if current_tail is not None:
+                    self.last_displayed_index = current_tail
+
+                # Update status
+                status = self.query_one("#status_bar", StatusBar)
+                status.log_count = len(self.log_buffer)
+                status.filter_info = self._get_filter_info(displayed)
 
     def add_log_line(self, log_widget: RichLog, entry: LogEntry) -> None:
         """Add a single log line to the widget."""
@@ -1292,6 +1426,8 @@ class LogViewer(App):
     def _on_levels_selected(self, selected_levels: set) -> None:
         """Handle level selection from modal."""
         self.filter_levels = selected_levels
+        self._update_level_indicator()
+        self.last_displayed_index = -1  # Force full rebuild
         self.refresh_table()
 
     def action_expand_level_filter(self) -> None:
@@ -1306,6 +1442,7 @@ class LogViewer(App):
         if len(self.filter_levels) == 0:
             # Start with ERROR only
             self.filter_levels = {0}
+            self._update_level_indicator()
         else:
             # Find the highest enabled level
             max_enabled = max(self.filter_levels)
@@ -1318,7 +1455,9 @@ class LogViewer(App):
 
             # Enable all levels from 0 to next_level (inclusive)
             self.filter_levels = set(range(next_level + 1))
+            self._update_level_indicator()
 
+        self.last_displayed_index = -1  # Force full rebuild
         self.refresh_table()
 
     def action_contract_level_filter(self) -> None:
@@ -1338,6 +1477,8 @@ class LogViewer(App):
 
         # Create range from 0 to (max_enabled - 1)
         self.filter_levels = set(range(max_enabled))
+        self._update_level_indicator()
+        self.last_displayed_index = -1  # Force full rebuild
         self.refresh_table()
 
     def action_toggle_file_filter(self) -> None:
@@ -1371,12 +1512,15 @@ class LogViewer(App):
             self.filter_files = None  # All files = no filter
         else:
             self.filter_files = selected_files
+        self.last_displayed_index = -1  # Force full rebuild
         self.refresh_table()
 
     def action_reset_filters(self) -> None:
         """Reset all filters to default."""
         self.filter_levels = set(range(len(LOG_LEVELS)))  # Show all levels
         self.filter_files = None  # Show all files
+        self._update_level_indicator()
+        self.last_displayed_index = -1  # Force full rebuild
         self.refresh_table()
 
     def action_view_log_entries(self) -> None:
@@ -1403,6 +1547,7 @@ class LogViewer(App):
         """Toggle freeze state."""
         self.frozen = not self.frozen
         if not self.frozen:
+            self.last_displayed_index = -1  # Force full rebuild when unfreezing
             self.refresh_table()
 
     def action_clear(self) -> None:
@@ -1414,6 +1559,7 @@ class LogViewer(App):
         with self.buffer_lock:
             self.log_buffer = Buffer(maxlen=self.args.buffer_depth)
             self.log_start = None
+            self.last_displayed_index = -1  # Reset display tracking
 
         log_widget = self.query_one("#log_table", RichLog)
         log_widget.clear()
