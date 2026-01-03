@@ -1,6 +1,6 @@
 """Textual-based TUI viewer for ulogger."""
 from textual.app import App, ComposeResult
-from textual.widgets import Footer, RichLog, Static, OptionList, Input
+from textual.widgets import Footer, RichLog, Static, OptionList, Input, DataTable
 from textual.widgets.option_list import Option
 from textual.screen import Screen, ModalScreen
 from textual.reactive import reactive
@@ -294,6 +294,221 @@ class ComPortSelectionScreen(ModalScreen[str]):
             self.dismiss(None)
 
 
+class AddWatchDialog(ModalScreen[tuple[str, int] | None]):
+    """Dialog for adding a new watch."""
+
+    CSS = """
+    AddWatchDialog {
+        align: center middle;
+        background: $background 80%;
+    }
+
+    #watch_dialog {
+        width: 60;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        layout: vertical;
+        padding: 1;
+    }
+
+    #watch_name_input {
+        margin: 1 0;
+    }
+
+    #var_list {
+        height: 8;
+        margin: 1 0;
+    }
+
+    #var_info {
+        margin: 1 0;
+        color: $accent;
+    }
+    """
+
+    def __init__(self, log_entry, default_name: str):
+        super().__init__()
+        self.log_entry = log_entry
+        self.default_name = default_name
+        self.selected_var_index = None
+        self.has_multiple_vars = log_entry.logmeta.types and len(log_entry.logmeta.types) > 1
+
+    def compose(self) -> ComposeResult:
+        """Create the dialog."""
+        from textual.containers import Container
+
+        with Container(id="watch_dialog"):
+            yield Static(f"Add Watch for: {self.log_entry.fmt}", id="watch_title")
+
+            # If only one variable, show it as info
+            if not self.has_multiple_vars:
+                if self.log_entry.logmeta.types and len(self.log_entry.logmeta.types) == 1:
+                    var_type = self.log_entry.logmeta.types[0]
+                    type_name = var_type.__name__ if hasattr(var_type, '__name__') else str(var_type)
+                    var_info = f"Variable 1: {type_name}"
+                    self.selected_var_index = 0
+                else:
+                    var_info = "No variables available"
+                yield Static(var_info, id="var_info")
+            else:
+                # Multiple variables - show selector
+                yield Static("Select Variable:", id="var_label")
+                yield OptionList(id="var_list")
+
+            yield Static("Watch Alias (leave empty for default):", id="name_label")
+            yield Input(placeholder=self.default_name, id="watch_name_input")
+            yield Static("Enter: Confirm | Esc: Cancel", id="watch_help")
+
+    def on_mount(self) -> None:
+        """Populate variable list if needed and focus appropriately."""
+        if self.has_multiple_vars:
+            # Populate the variable list
+            var_list = self.query_one("#var_list", OptionList)
+            for i, var_type in enumerate(self.log_entry.logmeta.types):
+                type_name = var_type.__name__ if hasattr(var_type, '__name__') else str(var_type)
+                var_list.add_option(Option(Text(f"Variable {i + 1}: {type_name}"), id=str(i)))
+            # Focus on variable list first
+            var_list.focus()
+        else:
+            # Focus on name input
+            self.query_one("#watch_name_input", Input).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Handle variable selection from the list."""
+        self.selected_var_index = int(event.option.id)
+        # Move focus to name input
+        self.query_one("#watch_name_input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key on name input - confirm watch."""
+        # If multiple vars and none selected, focus on var list
+        if self.has_multiple_vars and self.selected_var_index is None:
+            self.query_one("#var_list", OptionList).focus()
+            return
+
+        # Check if we have valid variable
+        if self.selected_var_index is None:
+            self.dismiss(None)
+            return
+
+        # Get the name, use default if empty
+        name = event.value.strip() or self.default_name
+        self.dismiss((name, self.selected_var_index))
+
+    def on_key(self, event) -> None:
+        """Handle keyboard events."""
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+
+
+class WatchWindow(Static):
+    """Floating window showing watched variables."""
+
+    CSS = """
+    WatchWindow {
+        background: $panel;
+        border: thick $primary;
+        padding: 0 1;
+    }
+
+    .watch-item {
+        height: 1;
+    }
+
+    .watch-item:hover {
+        background: $boost;
+    }
+    """
+
+    watches = reactive({})  # Dict of watch_id -> watch_data
+
+    def watch_watches(self, old_watches: dict, new_watches: dict) -> None:
+        """Update widget height when watches change."""
+        # Height = number of watch lines + empty spacing line + extra padding
+        num_lines = len(new_watches) if new_watches else 1
+        self.styles.height = num_lines + 2
+
+    def render(self) -> Text:
+        """Render the watch window."""
+        if not self.watches:
+            return Text()
+
+        lines = []
+
+        for watch_id, watch_data in self.watches.items():
+            line = Text()
+            line.append("✕ ", style="red bold")
+            line.append(f"{watch_data['name']}: ", style="yellow")
+            value_str = watch_data.get('value', '—')
+            line.append(str(value_str), style="white")
+            lines.append(line)
+
+        lines.append(Text())  # Empty line at bottom for spacing
+        return Text("\n").join(lines)
+
+    def on_click(self, event) -> None:
+        """Handle clicks on watch items."""
+        # Calculate which watch was clicked based on y position
+        if not self.watches:
+            return
+
+        # Line 0 is title, lines 1+ are watches
+        watch_line = event.y - 1
+        if watch_line >= 0 and watch_line < len(self.watches):
+            watch_id = list(self.watches.keys())[watch_line]
+            # Check if click was on the 'x' (first 2 characters)
+            if event.x < 2:
+                self.remove_watch(watch_id)
+
+    def add_watch(self, watch_id: int, name: str, log_entry, var_index: int):
+        """Add a new watch."""
+        new_watches = self.watches.copy()
+        new_watches[watch_id] = {
+            'name': name,
+            'log_entry': log_entry,
+            'var_index': var_index,
+            'value': '—'
+        }
+        self.watches = new_watches
+
+    def remove_watch(self, watch_id: int):
+        """Remove a watch."""
+        new_watches = self.watches.copy()
+        if watch_id in new_watches:
+            del new_watches[watch_id]
+        self.watches = new_watches
+
+        # If no watches left, hide the window
+        if not self.watches:
+            self.display = False
+
+    def update_watch(self, log_entry):
+        """Update watches that match this log entry."""
+        updated = False
+        new_watches = self.watches.copy()
+
+        for watch_id, watch_data in new_watches.items():
+            stored_entry = watch_data['log_entry']
+            # Match if same log definition (filename, line, level)
+            if (stored_entry.logmeta.filename == log_entry.logmeta.filename and
+                stored_entry.logmeta.line == log_entry.logmeta.line and
+                stored_entry.logmeta.level == log_entry.logmeta.level):
+
+                var_index = watch_data['var_index']
+                if log_entry.data and var_index < len(log_entry.data):
+                    # Format the value using the log entry's format
+                    value = log_entry.data[var_index]
+                    watch_data['value'] = str(value)
+                    updated = True
+
+        if updated:
+            self.watches = new_watches
+            self.refresh()  # Force visual refresh of the widget
+
+
 class LogEntriesViewScreen(Screen):
     """Modal screen for displaying all log entry definitions from ELF."""
 
@@ -323,6 +538,14 @@ class LogEntriesViewScreen(Screen):
         height: 1fr;
     }
 
+    DataTable {
+        height: 1fr;
+    }
+
+    DataTable > .datatable--cursor {
+        background: $boost;
+    }
+
     #entries_footer {
         height: 1;
         background: $panel;
@@ -340,13 +563,16 @@ class LogEntriesViewScreen(Screen):
     sort_mode = reactive("none")  # "none", "level", "file"
     search_text = reactive("")
 
-    def __init__(self, elf_reader, filename=None, level=None):
+    def __init__(self, elf_reader, filename=None, level=None, parent_viewer=None):
         super().__init__()
         self.elf_reader = elf_reader
         self.filename = filename
         self.level = level
         self.entries = []  # Store filtered entries for sorting/searching
+        self.displayed_entries = []  # Store currently displayed entries for click handling
         self.search_active = False
+        self.parent_viewer = parent_viewer
+        self.current_highlighted_entry = None  # Track currently selected entry for watch
 
     def compose(self) -> ComposeResult:
         """Create the log entries display."""
@@ -354,10 +580,10 @@ class LogEntriesViewScreen(Screen):
 
         with Container(id="entries_container"):
             yield Input(id="search_input", placeholder="Search in statements...")
-            yield RichLog(id="entries_list", highlight=True, markup=True)
+            yield DataTable(id="entries_table", cursor_type="row")
 
             # Add a custom footer inside the container
-            footer_text = Static("S: Sort | Ctrl+F: Search | Esc: Close", id="entries_footer")
+            footer_text = Static("S: Sort | Ctrl+F: Search | Click Type to Watch | Esc: Close", id="entries_footer")
             yield footer_text
 
     def on_mount(self) -> None:
@@ -404,16 +630,25 @@ class LogEntriesViewScreen(Screen):
             if self.level is not None and entry.level != self.level:
                 continue
 
+            # Skip entries with no types (none)
+            if not entry.types or len(entry.types) == 0:
+                continue
+
             self.entries.append(entry)
 
     def _refresh_display(self) -> None:
         """Refresh the display with current sort and search."""
-        log_widget = self.query_one("#entries_list", RichLog)
-        log_widget.clear()
+        table = self.query_one("#entries_table", DataTable)
+        table.clear(columns=True)
 
         if not self.elf_reader or not self.elf_reader.logs.elf_ready:
-            log_widget.write(Text("No ELF file loaded", style="red bold"))
             return
+
+        # Setup columns
+        table.add_column("Level", width=8)
+        table.add_column("File:Line", width=35)
+        table.add_column("Format", width=60)
+        table.add_column("Types", width=30)
 
         # Sort entries
         sorted_entries = self.entries.copy()
@@ -432,35 +667,74 @@ class LogEntriesViewScreen(Screen):
             ]
 
         # Display entries
-        if sorted_entries:
-            for entry in sorted_entries:
-                self._add_entry_line(log_widget, entry)
-        else:
-            if self.search_text:
-                log_widget.write(Text(f"No entries matching '{self.search_text}'", style="dim italic"))
+        for entry in sorted_entries:
+            level_str = LOG_LEVELS[entry.level] if entry.level < len(LOG_LEVELS) else f"L{entry.level}"
+            file_line = f"{entry.filename}:{entry.line}"
+
+            # Format the variable types
+            if entry.types:
+                type_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in entry.types]
+                var_types = ', '.join(type_names)
             else:
-                log_widget.write(Text("No log entries found matching criteria", style="dim italic"))
+                var_types = ""
 
-    def _add_entry_line(self, log_widget: RichLog, entry) -> None:
-        """Add a formatted log entry definition line."""
-        level_str = LOG_LEVELS[entry.level] if entry.level < len(LOG_LEVELS) else f"L{entry.level}"
-        level_color = LEVEL_COLORS.get(entry.level, "white")
-        file_line = f"{entry.filename}:{entry.line}"
+            # Create styled Text objects for colors
+            level_color = LEVEL_COLORS.get(entry.level, "white")
+            level_text = Text(level_str, style=level_color)
+            file_text = Text(file_line, style="blue")
+            fmt_text = Text(entry.fmt, style="white")
+            types_text = Text(var_types, style="cyan")
 
-        # Format the variable types - convert type objects to strings
-        if entry.types:
-            type_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in entry.types]
-            var_types = ', '.join(type_names)
-        else:
-            var_types = "none"
+            table.add_row(
+                level_text,
+                file_text,
+                fmt_text,
+                types_text,
+                key=str(id(entry))  # Use entry id as row key for lookup
+            )
 
-        line = Text()
-        line.append(f"{level_str:8} ", style=level_color)
-        line.append(f"{file_line:35} ", style="blue")
-        line.append(f"{entry.fmt:60} ", style="white")
-        line.append(f"[{var_types}]", style="dim cyan")
+        # Store entries for click handling
+        self.displayed_entries = sorted_entries
 
-        log_widget.write(line)
+        # Move cursor off the table to avoid initial selection highlight
+        if table.row_count > 0:
+            table.move_cursor(row=table.row_count)  # Move cursor past last row
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle row selection - trigger watch dialog."""
+        # Get which row was clicked
+        row_index = event.cursor_row
+        if row_index >= len(self.displayed_entries):
+            return
+
+        entry = self.displayed_entries[row_index]
+        self._show_watch_dialog(entry)
+
+
+    def _show_watch_dialog(self, entry) -> None:
+        """Show the watch dialog for a specific entry.
+
+        Args:
+            entry: The log entry to create a watch for
+            var_index: Index of the variable to watch (default: 0)
+        """
+        if not self.parent_viewer:
+            return
+
+        # Create a LogEntry instance for watching
+        from .logs import LogEntry
+        log_entry = LogEntry(entry, 0, ())
+
+        # Get next watch number
+        watch_num = self.parent_viewer.next_watch_number
+        default_name = f"W{watch_num}"
+
+        def handle_watch_result(result):
+            if result:
+                name, var_index = result
+                self.parent_viewer.add_watch(name, log_entry, var_index)
+
+        self.app.push_screen(AddWatchDialog(log_entry, default_name), handle_watch_result)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle search input submission."""
@@ -918,6 +1192,8 @@ class LogViewer(App):
     CSS = """
     Screen {
         background: $surface;
+        align: right top;
+        layers: below above;
     }
 
     LevelIndicatorHeader {
@@ -939,6 +1215,17 @@ class LogViewer(App):
         height: 1fr;
         background: $surface;
     }
+
+    #watch_window {
+        width: 35;
+        height: auto;
+        max-height: 30;
+        layer: above;
+        offset: -2 1;
+        border: panel orange;
+        border-title-align: center;
+        background: $panel;
+    }
     """
 
     BINDINGS = [
@@ -952,8 +1239,8 @@ class LogViewer(App):
         ("f", "toggle_file_filter", "Files"),
         ("p", "select_com_port", "COM Port"),
         ("r", "reset_filters", "Reset Filters"),
-        ("e", "view_log_entries", "View Log Entries"),
-        ("v", "view_all_lines", "View All Lines"),
+        ("e", "view_log_entries", "Entries"),
+        ("v", "view_all_lines", "Snapshot"),
         ("up", "scroll_up", "Scroll Up"),
         ("down", "scroll_down", "Scroll Down"),
         ("pageup", "page_up", "Page Up"),
@@ -990,10 +1277,17 @@ class LogViewer(App):
         self.min_refresh_interval = 0.05  # 20 FPS max
         self.last_displayed_index = -1  # Track last rendered entry for incremental updates
 
+        # Watch functionality
+        self.next_watch_number = 1
+        self.watch_counter = 0  # For unique watch IDs
+
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield LevelIndicatorHeader(id="level_header")
         yield RichLog(id="log_table", highlight=True, markup=True)
+        watch_window = WatchWindow(id="watch_window")
+        watch_window.border_title = "Watches"
+        yield watch_window
         yield StatusBar(id="status_bar")
         yield Footer()
 
@@ -1023,6 +1317,10 @@ class LogViewer(App):
         level_header = self.query_one("#level_header", LevelIndicatorHeader)
         level_header.comm_port = self.comm_port or "No port"
         self._update_level_indicator()
+
+        # Hide watch window initially
+        watch_window = self.query_one("#watch_window", WatchWindow)
+        watch_window.display = False
 
         # Update title to include COM port
         self.title = f"uLogger - {self.comm_port or 'No port'}"
@@ -1237,6 +1535,9 @@ class LogViewer(App):
         """Add a log entry to the buffer and request refresh (throttled)."""
         with self.buffer_lock:
             self.log_buffer.append(entry)
+
+            # Update watches with this entry
+            self._update_watches(entry)
 
             # Only update display if not frozen
             if not self.frozen:
@@ -1530,7 +1831,7 @@ class LogViewer(App):
             return
 
         self.push_screen(
-            LogEntriesViewScreen(self.elf_reader)
+            LogEntriesViewScreen(self.elf_reader, parent_viewer=self)
         )
 
     def action_view_all_lines(self) -> None:
@@ -1596,6 +1897,27 @@ class LogViewer(App):
         """Scroll to bottom."""
         log_widget = self.query_one("#log_table", RichLog)
         log_widget.scroll_end()
+
+    def add_watch(self, name: str, log_entry, var_index: int):
+        """Add a new watch."""
+        watch_window = self.query_one("#watch_window", WatchWindow)
+        watch_id = self.watch_counter
+        self.watch_counter += 1
+        self.next_watch_number += 1
+
+        watch_window.add_watch(watch_id, name, log_entry, var_index)
+        watch_window.display = True
+
+        self.notify(f"Added watch: {name}", timeout=2)
+
+    def _update_watches(self, entry: LogEntry):
+        """Update all watches that match this log entry."""
+        try:
+            watch_window = self.query_one("#watch_window", WatchWindow)
+            if watch_window.watches:
+                watch_window.update_watch(entry)
+        except:
+            pass  # Watch window may not be available yet
 
     def action_request_quit(self) -> None:
         """Quit the application and stop all threads."""
